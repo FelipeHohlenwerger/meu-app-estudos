@@ -18,25 +18,115 @@ const headingMarks = [
 ];
 
 const highlightColors: Record<string, string> = {
-  conceito: "#fff3a0",
-  critica: "#ffd0d0",
-  citacao: "#d4f7d4",
-  duvida: "#e6d9f7",
-  conexao: "#cfe8ff",
-  sintese: "#ffe4c2",
-  acao: "#dde4ea",
+  conceito: "#fff3a0",     // amarelo
+  duvidas: "#ffd0d0",      // vermelho
+  referencias: "#cfe8ff",  // azul
+  exemplo: "#ffe4c2",      // laranja
+  acao: "#dde4ea",         // cinza-azulado
+  opiniao_autor: "#e6d9f7",// roxo
 };
 const underlineColors: Record<string, string> = {
   conceito: "#d4af00",
-  critica: "#d04444",
-  citacao: "#2e9e4e",
-  duvida: "#8d5fc7",
-  conexao: "#2f7fd6",
-  sintese: "#d6822f",
+  duvidas: "#d04444",
+  referencias: "#2f7fd6",
+  exemplo: "#d6822f",
   acao: "#5b6b78",
+  opiniao_autor: "#8d5fc7",
   preto: "#000000",
   azul: "#1e5fd6",
 };
+
+const calloutColors: Record<string, string> = {
+  sintese: "#2e9e4e",      // verde
+  importante: "#d4af00",   // amarelo
+  duvidas: "#d04444",      // vermelho
+  referencias: "#2f7fd6",  // azul
+  exemplos: "#d6822f",     // laranja
+  citacoes: "#8d5fc7",     // roxo
+};
+
+// Reconhece um bloco callout estilo Obsidian:
+// > [!tipo]
+// > linha 1
+// > linha 2 (continua enquanto as linhas começarem com ">")
+function findCallouts(docText: string) {
+  const results: { tipo: string; headerFrom: number; headerTo: number; from: number; to: number }[] = [];
+  const lines = docText.split("\n");
+  let offset = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const headerMatch = line.match(/^>\s*\[!(\w+)\]\s*$/);
+
+    if (headerMatch) {
+      const headerFrom = offset;
+      const headerTo = offset + line.length;
+      let blockEnd = headerTo;
+      let cursor = offset + line.length + 1; // pula a quebra de linha
+
+      // Continua enquanto as próximas linhas também começarem com ">"
+      let j = i + 1;
+      while (j < lines.length && /^>/.test(lines[j])) {
+        blockEnd = cursor + lines[j].length;
+        cursor += lines[j].length + 1;
+        j++;
+      }
+
+      results.push({
+        tipo: headerMatch[1],
+        headerFrom,
+        headerTo,
+        from: headerFrom,
+        to: blockEnd,
+      });
+
+      i = j - 1; // pula as linhas já consumidas pelo bloco
+      offset = cursor;
+      continue;
+    }
+
+    offset += line.length + 1;
+  }
+
+  return results;
+}
+
+function calloutBlockMark(tipo: string) {
+  const color = calloutColors[tipo] ?? "#888";
+  return Decoration.mark({
+    attributes: {
+      style: `display: inline; border-left: 3px solid ${color}; background-color: ${color}1a; padding: 2px 8px; border-radius: 0 4px 4px 0;`,
+    },
+  });
+}
+
+function calloutLabelWidget(tipo: string) {
+  const color = calloutColors[tipo] ?? "#888";
+  const span = document.createElement("span");
+  span.textContent = tipo.toUpperCase();
+  span.style.display = "block";
+  span.style.fontWeight = "bold";
+  span.style.fontSize = "0.75em";
+  span.style.color = color;
+  span.style.marginBottom = "2px";
+  return span;
+}
+
+class CalloutLabelWidget extends WidgetType {
+  constructor(private tipo: string) {
+    super();
+  }
+  eq(other: CalloutLabelWidget) {
+    return other.tipo === this.tipo;
+  }
+  toDOM() {
+    return calloutLabelWidget(this.tipo);
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
 
 function underlineMarkFor(tipo: string) {
   const color = underlineColors[tipo] ?? "#666666";
@@ -338,7 +428,29 @@ function buildDecorations(view: EditorView): DecorationSet {
       entries.push({ from: anchorStart, to: anchorEnd, decoration: underlineStyle });
       entries.push({ from: anchorEnd, to: fullEnd, decoration: hideMark });
     }
+
+    // --- CALLOUTS (> [!tipo] ... linhas com >) ---
+    // Processado sobre o documento inteiro (não só o range visível), pois blocos
+    // podem ter múltiplas linhas e a posição de início pode estar fora do range.
   }
+
+  // Callouts processados uma única vez, fora do loop de visibleRanges
+  const fullText = view.state.doc.toString();
+  const callouts = findCallouts(fullText);
+  for (const c of callouts) {
+    const editingHeader = cursorTouches(view, c.headerFrom, c.headerTo);
+    entries.push({ from: c.headerFrom, to: c.to, decoration: calloutBlockMark(c.tipo) });
+
+    if (!editingHeader) {
+      entries.push({
+        from: c.headerFrom,
+        to: c.headerTo,
+        decoration: Decoration.replace({ widget: new CalloutLabelWidget(c.tipo) }),
+      });
+    }
+  }
+    
+    
 
   // Ordena todas as entradas por posição (exigência do RangeSetBuilder)
   entries.sort((a, b) => a.from - b.from || a.to - b.to);

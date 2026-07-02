@@ -17,14 +17,22 @@ import { setActiveCommentEffect, activeCommentField } from "@/lib/livePreview";
 
 const underlineColorsPalette: Record<string, string> = {
   conceito: "#d4af00",
-  critica: "#d04444",
-  citacao: "#2e9e4e",
-  duvida: "#8d5fc7",
-  conexao: "#2f7fd6",
-  sintese: "#d6822f",
+  duvidas: "#d04444",
+  referencias: "#2f7fd6",
+  exemplo: "#d6822f",
   acao: "#5b6b78",
+  opiniao_autor: "#8d5fc7",
   preto: "#000000",
   azul: "#1e5fd6",
+};
+
+const calloutColorsPalette: Record<string, string> = {
+  sintese: "#2e9e4e",
+  importante: "#d4af00",
+  duvidas: "#d04444",
+  referencias: "#2f7fd6",
+  exemplos: "#d6822f",
+  citacoes: "#8d5fc7",
 };
 
 const customHighlightStyle = HighlightStyle.define([
@@ -77,6 +85,8 @@ export default function Home() {
     anchorText?: string; // só usado no modo edit
     initialText?: string; // só usado no modo edit
   } | null>(null);
+
+  const [showCalloutMenu, setShowCalloutMenu] = useState(false);
 
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -406,6 +416,26 @@ export default function Home() {
     setMenuPos(null);
   }
 
+  function insertCallout(tipo: string) {
+    const view = editorViewRef.current;
+    if (!view) return;
+
+    const cursor = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(cursor);
+
+    // Insere o bloco callout depois da linha atual
+    const insertPos = line.to;
+    const calloutText = `\n> [!${tipo}]\n> `;
+
+    view.dispatch({
+      changes: { from: insertPos, to: insertPos, insert: calloutText },
+      selection: EditorSelection.cursor(insertPos + calloutText.length),
+    });
+
+    setShowCalloutMenu(false);
+    view.focus();
+  }
+
   // Abre o modal pré-preenchido para editar um comentário já existente
   function editComment(from: number) {
     const view = editorViewRef.current;
@@ -479,9 +509,79 @@ export default function Home() {
           gap: "0.5rem",
           padding: "0.5rem 1rem",
           borderBottom: "1px solid #ccc",
+          position: "relative",
         }}
       >
         <strong style={{ marginRight: "1rem" }}>Meu App de Estudo</strong>
+
+        {/* Botão de inserir callout */}
+        <div style={{ position: "relative" }}>
+          <button
+            onClick={() => setShowCalloutMenu((prev) => !prev)}
+            style={{
+              padding: "0.4rem 0.8rem",
+              background: showCalloutMenu ? "#eee" : "transparent",
+              border: "1px solid #ccc",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+          >
+            📦 Callout
+          </button>
+
+          {showCalloutMenu && (
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 4px)",
+                left: 0,
+                background: "white",
+                border: "1px solid #ccc",
+                borderRadius: "6px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                padding: "0.5rem",
+                zIndex: 1000,
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.3rem",
+                minWidth: "160px",
+              }}
+            >
+              {Object.entries(calloutColorsPalette).map(([tipo, cor]) => (
+                <button
+                  key={tipo}
+                  onClick={() => insertCallout(tipo)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    padding: "0.4rem 0.6rem",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontSize: "13px",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "#f5f5f5")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span
+                    style={{
+                      width: "12px",
+                      height: "12px",
+                      borderRadius: "50%",
+                      background: cor,
+                      flexShrink: 0,
+                    }}
+                  />
+                  {tipo}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <button
           onClick={() => setShowComments((prev) => !prev)}
           style={{

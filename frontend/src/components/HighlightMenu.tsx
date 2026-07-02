@@ -2,27 +2,26 @@
 
 import { useState } from "react";
 
-const TIPOS_FUNDO = ["conceito", "critica", "citacao", "duvida", "conexao", "sintese", "acao"];
+const TIPOS_FUNDO = ["conceito", "duvidas", "referencias", "exemplo", "acao", "opiniao_autor"];
 const TIPOS_SUBLINHADO = [...TIPOS_FUNDO, "preto", "azul"];
+const TIPOS_COMENTARIO = [...TIPOS_FUNDO];
 
 const CORES_FUNDO: Record<string, string> = {
   conceito: "#fff3a0",
-  critica: "#ffd0d0",
-  citacao: "#d4f7d4",
-  duvida: "#e6d9f7",
-  conexao: "#cfe8ff",
-  sintese: "#ffe4c2",
+  duvidas: "#ffd0d0",
+  referencias: "#cfe8ff",
+  exemplo: "#ffe4c2",
   acao: "#dde4ea",
+  opiniao_autor: "#e6d9f7",
 };
 
 const CORES_SUBLINHADO: Record<string, string> = {
   conceito: "#d4af00",
-  critica: "#d04444",
-  citacao: "#2e9e4e",
-  duvida: "#8d5fc7",
-  conexao: "#2f7fd6",
-  sintese: "#d6822f",
+  duvidas: "#d04444",
+  referencias: "#2f7fd6",
+  exemplo: "#d6822f",
   acao: "#5b6b78",
+  opiniao_autor: "#8d5fc7",
   preto: "#000000",
   azul: "#1e5fd6",
 };
@@ -37,12 +36,12 @@ type Props = {
   initialModo?: "fundo" | "sublinhado" | "comentario";
 };
 
-
 export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, initialTipo, initialModo }: Props) {
   const [modo, setModo] = useState<"fundo" | "sublinhado" | "comentario">(initialModo ?? "fundo");
-  const tipos = modo === "fundo" ? TIPOS_FUNDO : modo === "sublinhado" ? TIPOS_SUBLINHADO : TIPOS_FUNDO;
-  const cores = modo === "fundo" ? CORES_FUNDO : modo === "sublinhado" ? CORES_SUBLINHADO : CORES_FUNDO;
 
+  // Estas linhas DENTRO do componente, onde "modo" existe
+  const tipos = modo === "fundo" ? TIPOS_FUNDO : modo === "sublinhado" ? TIPOS_SUBLINHADO : TIPOS_COMENTARIO;
+  const cores = modo === "fundo" ? CORES_FUNDO : modo === "sublinhado" ? CORES_SUBLINHADO : CORES_FUNDO;
 
   return (
     <div
@@ -104,6 +103,7 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, ini
           </button>
         )}
       </div>
+
       <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", maxWidth: "220px" }}>
         {tipos.map((tipo) => (
           <button
