@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Fraunces, Lora, Literata, Source_Serif_4, Inter, Atkinson_Hyperlegible } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -9,6 +10,26 @@ const geistSans = Geist({
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+// Usada só nos títulos da página "biblioteca" (src/components/LibraryHome.tsx e
+// TagNoteList.tsx) — o resto do app continua na fonte sans já existente.
+const fraunces = Fraunces({
+  variable: "--font-fraunces",
+  subsets: ["latin"],
+});
+
+// Opções de fonte do corpo das notas (ver src/lib/fonts.ts) — cada uma vira
+// uma CSS variable; o navegador só baixa o arquivo da fonte realmente usada
+// em algo visível, então declarar as 5 aqui não baixa as 5 à toa.
+const lora = Lora({ variable: "--font-lora", subsets: ["latin"] });
+const literata = Literata({ variable: "--font-literata", subsets: ["latin"] });
+const sourceSerif = Source_Serif_4({ variable: "--font-source-serif", subsets: ["latin"] });
+const interBody = Inter({ variable: "--font-inter-body", subsets: ["latin"] });
+const atkinsonHyperlegible = Atkinson_Hyperlegible({
+  variable: "--font-atkinson",
+  weight: ["400", "700"],
   subsets: ["latin"],
 });
 
@@ -25,8 +46,26 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${fraunces.variable} ${lora.variable} ${literata.variable} ${sourceSerif.variable} ${interBody.variable} ${atkinsonHyperlegible.variable} h-full antialiased`}
+      // O script de tema abaixo seta "data-theme" no <html> antes da hidratação,
+      // que o servidor nunca renderiza (não tem acesso a localStorage) — isso é
+      // intencional, não deixa o React tentar "corrigir" e reclamar do mismatch.
+      suppressHydrationWarning
     >
+      <head>
+        {/* Aplica o tema salvo ANTES do primeiro paint — sem isso a página
+            sempre nasceria escura por uma fração de segundo mesmo com o tema
+            claro salvo, já que o CSS/React só reagem depois da hidratação.
+            "beforeInteractive" é a forma suportada pelo Next pra isso (um
+            <script> comum gera aviso do React e não tem essa garantia). */}
+        <Script
+          id="theme-init"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem("theme");if(t==="light")document.documentElement.dataset.theme="light";}catch(e){}`,
+          }}
+        />
+      </head>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

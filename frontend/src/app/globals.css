@@ -1,8 +1,39 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Tema escuro "sépia noturno" */
+  /* Diz ao navegador qual paleta usar pros controles nativos (select/option,
+     scrollbar, checkbox) que não são totalmente cobertos por CSS nosso — sem
+     isso, o menu suspenso de um <select> cai no branco/preto padrão do
+     navegador mesmo com --panel-bg/--foreground escuros, ficando ilegível. */
+  color-scheme: dark;
+  --background: #1c1a17;
+  --foreground: #e8ddc9;
+  --panel-bg: #26221d;
+  --panel-hover: #2f2a23;
+  --panel-border: #3a352c;
+  --text-muted: #8a7f6c;
+  --radius: 8px;
+  --accent: #d4af6a;
+  /* Gradiente decorativo no topo da Homepage — ver LibraryHome.tsx */
+  --gradient-top: #26221d;
+}
+
+/* Tema claro "papel creme" — alternado via botão no header, persistido em
+   localStorage (ver page.tsx). As cores semânticas (paleta de highlight/
+   callout, os pontinhos de status, o "universo" fixo do Graph View) ficam de
+   fora de propósito — são cor de conteúdo/marca, não de superfície, e não
+   devem mudar com o tema. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #f5f0e6;
+  --foreground: #3a3226;
+  --panel-bg: #fbf8f1;
+  --panel-hover: #f0e9d8;
+  --panel-border: #e0d8c5;
+  --text-muted: #8a7d63;
+  --accent: #2f7fd6;
+  --gradient-top: #ecdfc4;
 }
 
 body {
@@ -13,4 +44,43 @@ body {
 .comment-anchor-active {
   background-color: rgba(255, 220, 100, 0.4);
   border-radius: 2px;
+}
+
+/* Blocos de código (Shiki, ver src/lib/shikiThemes.ts): com defaultColor:false
+   o Shiki só define as variables --shiki-dark/--shiki-light por token, sem
+   aplicar cor nenhuma sozinho — essas duas regras decidem qual delas vale,
+   no mesmo espírito do resto do app (alternância via [data-theme="light"]).
+   Fundo/margem do próprio <pre> do Shiki são removidos porque o container do
+   CodeBlockWidget (livePreview.ts) já cuida disso. */
+.shiki,
+.shiki code {
+  background-color: transparent !important;
+  margin: 0;
+  padding: 0;
+}
+.shiki,
+.shiki span {
+  color: var(--shiki-dark);
+}
+:root[data-theme="light"] .shiki,
+:root[data-theme="light"] .shiki span {
+  color: var(--shiki-light);
+}
+
+.note-card {
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.note-card:hover {
+  border-color: var(--accent);
+}
+.note-card:hover .note-card-title {
+  color: var(--accent);
+}
+
+.toolbar-link {
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.toolbar-link:hover {
+  color: var(--accent);
+  background-color: var(--panel-hover);
 }

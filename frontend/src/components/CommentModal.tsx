@@ -28,11 +28,12 @@ export default function CommentModal({ tipo, initialText, onConfirm, onCancel }:
       <div
         onClick={(e) => e.stopPropagation()} // evita que clique dentro do modal feche ele
         style={{
-          background: "white",
+          background: "var(--panel-bg)",
+          border: "1px solid var(--panel-border)",
           borderRadius: "8px",
           padding: "1.5rem",
           width: "360px",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
         }}
       >
         <h3 style={{ marginBottom: "0.75rem", fontSize: "1rem" }}>
@@ -51,21 +52,23 @@ export default function CommentModal({ tipo, initialText, onConfirm, onCancel }:
             fontSize: "14px",
             fontFamily: "inherit",
             resize: "vertical",
-            border: "1px solid #ccc",
+            border: "1px solid var(--panel-border)",
             borderRadius: "4px",
+            background: "var(--background)",
+            color: "var(--foreground)",
           }}
         />
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", marginTop: "1rem" }}>
           <button
             onClick={onCancel}
-            style={{ padding: "0.4rem 0.8rem", border: "1px solid #ccc", borderRadius: "4px", background: "transparent", cursor: "pointer" }}
+            style={{ padding: "0.4rem 0.8rem", border: "1px solid var(--panel-border)", borderRadius: "4px", background: "transparent", color: "var(--foreground)", cursor: "pointer" }}
           >
             Cancelar
           </button>
           <button
             onClick={() => texto.trim() && onConfirm(texto.trim())}
-            style={{ padding: "0.4rem 0.8rem", border: "none", borderRadius: "4px", background: "#333", color: "white", cursor: "pointer" }}
+            style={{ padding: "0.4rem 0.8rem", border: "none", borderRadius: "4px", background: "#2f7fd6", color: "white", cursor: "pointer" }}
           >
             Confirmar
           </button>

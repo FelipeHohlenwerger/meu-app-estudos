@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-pick-folder"
+description = "Allows opening the native folder picker for the vault creation flow."
+commands.allow = ["pick_folder"]

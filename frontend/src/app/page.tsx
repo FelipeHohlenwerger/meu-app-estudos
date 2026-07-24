@@ -1,505 +1,939 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import { markdown } from "@codemirror/lang-markdown";
-import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
-import { tags } from "@lezer/highlight";
-import { basicLight } from "@uiw/codemirror-theme-basic";
-import { livePreviewPlugin } from "@/lib/livePreview";
-import { GFM } from "@lezer/markdown";
-import HighlightMenu from "@/components/HighlightMenu";
-import { EditorView, lineNumbers } from "@codemirror/view";
-import { EditorSelection } from "@codemirror/state";
-import CommentModal from "@/components/CommentModal";
-import { setActiveCommentEffect, activeCommentField } from "@/lib/livePreview";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import GraphView, { type GraphNode, type GraphEdge } from "@/components/GraphView";
+import LibraryHome from "@/components/LibraryHome";
+import TagNoteList from "@/components/TagNoteList";
+import { type LibraryNote } from "@/components/NoteCard";
+import NewNoteMenu from "@/components/NewNoteMenu";
+import NoteRowMenu from "@/components/NoteRowMenu";
+import ConfirmModal from "@/components/ConfirmModal";
+import ImportProgressModal from "@/components/ImportProgressModal";
+import ImportWebModal from "@/components/ImportWebModal";
+import { GRAPH_SPACE_BACKGROUND } from "@/lib/colors";
+import { STATUS_LABELS } from "@/lib/noteStatus";
+import NotePanel, { type NotePanelHandle } from "@/components/NotePanel";
+import VaultSwitcher from "@/components/VaultSwitcher";
+import { VaultContext, appendVaultParam, type VaultEntry } from "@/lib/vaultContext";
+import { setActiveVaultId as setLivePreviewVaultId } from "@/lib/livePreview";
+import { DEFAULT_NOTE_FONT, type NoteFontId } from "@/lib/fonts";
 
+function stripMdExtension(filename: string): string {
+  return filename.replace(/\.(md|pdf|epub)$/i, "");
+}
 
-const underlineColorsPalette: Record<string, string> = {
-  conceito: "#d4af00",
-  duvidas: "#d04444",
-  referencias: "#2f7fd6",
-  exemplo: "#d6822f",
-  acao: "#5b6b78",
-  opiniao_autor: "#8d5fc7",
-  preto: "#000000",
-  azul: "#1e5fd6",
-};
+// Chave do grupo "Sem tag" no expandedTags (não pode ser null, já que é chave de Set<string>).
+const UNTAGGED_GROUP_KEY = "__sem_tag__";
 
-const calloutColorsPalette: Record<string, string> = {
-  sintese: "#2e9e4e",
-  importante: "#d4af00",
-  duvidas: "#d04444",
-  referencias: "#2f7fd6",
-  exemplos: "#d6822f",
-  citacoes: "#8d5fc7",
-};
-
-const customHighlightStyle = HighlightStyle.define([
-  { tag: tags.heading, textDecoration: "none", fontWeight: "normal" }, // remove sublinhado/negrito nativos
-  { tag: tags.strong, fontWeight: "bold" },
-  { tag: tags.emphasis, fontStyle: "italic" },
-  { tag: tags.link, color: "#2f7fd6" },
-  { tag: tags.monospace, fontFamily: "monospace", color: "#a33" },
-]);
-
-function EditIcon() {
+function SearchIcon() {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
     </svg>
   );
 }
 
-function TrashIcon() {
+function MoreIcon() {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 6h18" />
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="5" cy="12" r="2" />
+      <circle cx="12" cy="12" r="2" />
+      <circle cx="19" cy="12" r="2" />
     </svg>
   );
 }
 
+function PlusIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function SidebarToggleIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </svg>
+  );
+}
+
+function BackArrowIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 12H5" />
+      <path d="m12 19-7-7 7-7" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.5A8.5 8.5 0 1 1 11.5 3a7 7 0 0 0 9.5 9.5Z" />
+    </svg>
+  );
+}
+
+type HomeView =
+  | { kind: "library" }
+  | { kind: "tagList"; tag: string | null }
+  | { kind: "allNotes" }
+  | { kind: "statusList"; status: string }
+  | { kind: "editor" };
 
 export default function Home() {
-  const [notes, setNotes] = useState<string[]>([]);
-  const [activeNote, setActiveNote] = useState<string | null>(null);
-  const [content, setContent] = useState("");
-  const [status, setStatus] = useState("");
-  const [editingHighlight, setEditingHighlight] = useState<{
-    from: number;
-    to: number;
-    tipo: string;
-    modo: "fundo" | "sublinhado";
-  } | null>(null);
-  const [activeCommentId, setActiveCommentId] = useState<string | null>(null);
-
-  const [showComments, setShowComments] = useState(false);
-  const [commentDraft, setCommentDraft] = useState<{
-    tipo: string;
-    from: number;
-    to: number;
-    mode: "create" | "edit";
-    anchorText?: string; // só usado no modo edit
-    initialText?: string; // só usado no modo edit
-  } | null>(null);
-
-  const [showCalloutMenu, setShowCalloutMenu] = useState(false);
-
-  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
-  const editorViewRef = useRef<EditorView | null>(null);
-  const sectionRef = useRef<HTMLDivElement>(null);
-
-  type BalloonPosition = { tipo: string; comentario: string; from: number; to: number; anchorTop: number; top: number };
-
-
-  const [balloonPositions, setBalloonPositions] = useState<BalloonPosition[]>([]);
-
+  // Vault ativo — ver src/lib/vaultContext.tsx. `activeVaultId` começa null
+  // (ainda carregando a lista) até o efeito abaixo resolver qual vault abrir.
+  const [vaults, setVaults] = useState<VaultEntry[]>([]);
+  const [activeVaultId, setActiveVaultId] = useState<string | null>(null);
+  // Espelha activeVaultId pra checar, dentro de callbacks de fetch já em voo,
+  // se a resposta ainda é do vault ativo — sem isso, trocar de vault rápido
+  // (ex: logo depois de criar um vault novo) corre risco de uma resposta
+  // ATRASADA do vault ANTERIOR sobrescrever os dados corretos do vault novo
+  // (ordem de conclusão de rede não é garantida ser a ordem de disparo).
+  const activeVaultIdRef = useRef<string | null>(null);
   useEffect(() => {
-    const view = editorViewRef.current;
-    if (!view) return;
+    activeVaultIdRef.current = activeVaultId;
+  }, [activeVaultId]);
 
-    function recalcularBaloes() {
-      if (!view) return;
-      const regex = /~(.+?)~¶(\w+){([^}]*)}/g;
-      const sectionEl = sectionRef.current;
-      if (!sectionEl) return;
-      const editorRect = sectionEl.getBoundingClientRect();
-      const positions: BalloonPosition[] = [];
+  const [homeView, setHomeView] = useState<HomeView>({ kind: "library" });
+  const [libraryNotes, setLibraryNotes] = useState<LibraryNote[]>([]);
+  const [allTags, setAllTags] = useState<string[]>([]);
 
-      let match: RegExpExecArray | null;
-      while ((match = regex.exec(content)) !== null) {
-        const from = match.index;
-        const to = from + match[0].length;
+  // Tela dividida: dois painéis independentes (cada um com seu próprio estado
+  // de nota, edição, comentários etc. — ver NotePanel.tsx), controlados por
+  // qual arquivo cada um mostra. panelB só existe (é renderizado) quando
+  // splitMode está ativo. focusedPanel decide pra qual painel vai a próxima
+  // nota aberta pela sidebar quando os dois já estão ocupados.
+  const [panelA, setPanelA] = useState<string | null>(null);
+  const [panelB, setPanelB] = useState<string | null>(null);
+  const [splitMode, setSplitMode] = useState(false);
+  const [focusedPanel, setFocusedPanel] = useState<"a" | "b">("a");
+  const panelARef = useRef<NotePanelHandle>(null);
+  const panelBRef = useRef<NotePanelHandle>(null);
 
-        // Ancora no FIM do texto sublinhado (não no início da linha) —
-        // mais próximo visualmente do ponto real onde a anotação deveria nascer.
-        const anchorTextEnd = from + 1 + match[1].length;
-        const coords = view.coordsAtPos(anchorTextEnd);
+  // Recolher/expandir a sidebar de notas — não precisa persistir entre
+  // sessões, sempre volta expandida ao reabrir o app.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-        if (coords) {
-          const anchorTop = coords.top - editorRect.top;
-          positions.push({
-            tipo: match[2],
-            comentario: match[3],
-            from,
-            to,
-            anchorTop,
-            top: anchorTop,
-          });
-        }
+  const [sidebarSearch, setSidebarSearch] = useState("");
+  const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
+  // Chave da ocorrência sendo renomeada na sidebar: "group.key::note.filename",
+  // não só o filename — uma nota com várias tags aparece repetida em vários grupos,
+  // e se a chave fosse só o filename, TODAS as ocorrências virariam <input
+  // autoFocus> ao mesmo tempo; dois autoFocus simultâneos brigam pelo foco real do
+  // navegador, o primeiro perde o foco, dispara onBlur, e cancela o rename sozinho.
+  const [renamingKey, setRenamingKey] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [noteRowMenu, setNoteRowMenu] = useState<{ x: number; y: number; rowKey: string; filename: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ filename: string } | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ filenames: string[] } | null>(null);
+  // Rastreia o clique anterior na sidebar pra distinguir "clique, espera, clique
+  // de novo" (entra em modo renomear) de um duplo-clique rápido (só reabre a nota
+  // — não deve renomear sem querer).
+  const lastNoteClickRef = useRef<{ filename: string; time: number } | null>(null);
+
+  // Menu "+" (Nota em branco / Importar PDF/EPUB) — uma única instância
+  // compartilhada pelos 3 gatilhos (homepage, header, sidebar).
+  const [newNoteMenuAnchor, setNewNoteMenuAnchor] = useState<{
+    x: number;
+    y: number;
+    direction: "down-right" | "up-left";
+  } | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importingMessage, setImportingMessage] = useState("Convertendo arquivo...");
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const [importWebOpen, setImportWebOpen] = useState(false);
+  const [importWebUrl, setImportWebUrl] = useState("");
+  const [creatingBlankNote, setCreatingBlankNote] = useState(false);
+
+  // Última view (biblioteca/lista de tag/todas as notas) antes de abrir uma
+  // nota no editor — permite o botão "Voltar" retornar exatamente pra onde a
+  // pessoa estava, em vez de sempre cair na Biblioteca raiz.
+  const [previousHomeView, setPreviousHomeView] = useState<HomeView>({ kind: "library" });
+
+  const [showGraph, setShowGraph] = useState(false);
+  const [graphScope, setGraphScope] = useState<"local" | "global">("local");
+  const [graphLayout, setGraphLayout] = useState<"force" | "radial">("force");
+  const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
+  // Tela cheia do Graph View: um overlay cobrindo a janela inteira em vez do
+  // painel lateral de 420px — o conteúdo (cabeçalho + toggles + GraphView) é o
+  // mesmo, só muda o wrapper (ver graphPanelBody mais abaixo).
+  const [graphFullscreen, setGraphFullscreen] = useState(false);
+
+  // Tema claro/escuro — sempre começa em "dark" (igual ao servidor, que não
+  // tem acesso a localStorage) pra não causar hydration mismatch; o script em
+  // layout.tsx já aplicou o data-theme certo no <html> ANTES do primeiro
+  // paint (isso evita o flash visual), e este efeito só sincroniza o estado
+  // React com o que já está no DOM logo depois da hidratação.
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  useEffect(() => {
+    if (document.documentElement.dataset.theme === "light") setTheme("light");
+  }, []);
+
+  // Tamanho de fonte do editor: um padrão global ("fontSize") e sobrescritas
+  // por nota ("fontSizeOverrides", um blob { [filename]: number }) — compartilhado
+  // entre os dois painéis (a mesma nota deve ler o mesmo tamanho não importa em
+  // qual painel for aberta).
+  const [globalFontSize, setGlobalFontSize] = useState<number>(14);
+  const [noteFontSizes, setNoteFontSizes] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const storedGlobal = localStorage.getItem("fontSize");
+    if (storedGlobal) {
+      const parsed = Number(storedGlobal);
+      if (!Number.isNaN(parsed)) setGlobalFontSize(parsed);
+    }
+    const storedOverrides = localStorage.getItem("fontSizeOverrides");
+    if (storedOverrides) {
+      try {
+        setNoteFontSizes(JSON.parse(storedOverrides));
+      } catch {
+        // ignora blob corrompido
       }
-      // Ordena por posição vertical desejada, depois ajusta para evitar sobreposição
-      positions.sort((a, b) => a.anchorTop - b.anchorTop);
-      const MIN_GAP = 56;
-      for (let i = 1; i < positions.length; i++) {
-        const prev = positions[i - 1];
-        const curr = positions[i];
-        if (curr.top < prev.top + MIN_GAP) {
-          curr.top = prev.top + MIN_GAP;
-        }
-      }
+    }
+  }, []);
 
-      setBalloonPositions(positions);
+  function fontSizeFor(filename: string | null): number {
+    return (filename && noteFontSizes[filename]) || globalFontSize;
+  }
+
+  function handleFontSizeChange(filename: string | null, newSize: number) {
+    if (filename && filename in noteFontSizes) {
+      const next = { ...noteFontSizes, [filename]: newSize };
+      setNoteFontSizes(next);
+      localStorage.setItem("fontSizeOverrides", JSON.stringify(next));
+    } else {
+      setGlobalFontSize(newSize);
+      localStorage.setItem("fontSize", String(newSize));
+    }
+  }
+
+  function handleToggleFontSizeOverride(filename: string, checked: boolean, currentSize: number) {
+    const next = { ...noteFontSizes };
+    if (checked) next[filename] = currentSize;
+    else delete next[filename];
+    setNoteFontSizes(next);
+    localStorage.setItem("fontSizeOverrides", JSON.stringify(next));
+  }
+
+  // Fonte do corpo do texto: mesmo padrão de fontSize acima (global +
+  // overrides por nota), mas independente — cada preferência liga/desliga
+  // por conta própria.
+  const [globalNoteFont, setGlobalNoteFont] = useState<NoteFontId>(DEFAULT_NOTE_FONT);
+  const [noteFontOverrides, setNoteFontOverrides] = useState<Record<string, NoteFontId>>({});
+  useEffect(() => {
+    const storedGlobal = localStorage.getItem("noteFont");
+    if (storedGlobal) setGlobalNoteFont(storedGlobal as NoteFontId);
+    const storedOverrides = localStorage.getItem("noteFontOverrides");
+    if (storedOverrides) {
+      try {
+        setNoteFontOverrides(JSON.parse(storedOverrides));
+      } catch {
+        // ignora blob corrompido
+      }
+    }
+  }, []);
+
+  function noteFontFor(filename: string | null): NoteFontId {
+    return (filename && noteFontOverrides[filename]) || globalNoteFont;
+  }
+
+  function handleNoteFontChange(filename: string | null, newFont: NoteFontId) {
+    if (filename && filename in noteFontOverrides) {
+      const next = { ...noteFontOverrides, [filename]: newFont };
+      setNoteFontOverrides(next);
+      localStorage.setItem("noteFontOverrides", JSON.stringify(next));
+    } else {
+      setGlobalNoteFont(newFont);
+      localStorage.setItem("noteFont", newFont);
+    }
+  }
+
+  function handleToggleNoteFontOverride(filename: string, checked: boolean, currentFont: NoteFontId) {
+    const next = { ...noteFontOverrides };
+    if (checked) next[filename] = currentFont;
+    else delete next[filename];
+    setNoteFontOverrides(next);
+    localStorage.setItem("noteFontOverrides", JSON.stringify(next));
+  }
+
+  const [noteTargets, setNoteTargets] = useState<{ filename: string; title: string; aliases: string[] }[]>([]);
+
+  // Nota "em foco" no momento — usada pelo Graph view (escopo local) e por
+  // qualquer outra coisa global que precise saber "a nota que a pessoa está
+  // olhando agora", já que com dois painéis não existe mais uma "activeNote" única.
+  const focusedFilename = focusedPanel === "a" ? panelA : panelB;
+
+  // Salva a lista inteira de tags de uma nota (chamado pelo NotePanel a cada
+  // adição/remoção de chip) e reflete a mudança na sidebar sem recarregar a
+  // página inteira.
+  function handleTagsChanged(filename: string, nextTags: string[]) {
+    setLibraryNotes((prev) => prev.map((note) => (note.filename === filename ? { ...note, tags: nextTags } : note)));
+    vaultFetch("/api/note/tags", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, tags: nextTags }),
+    }).then(() => refreshAllTags());
+  }
+
+  // Salva o status de estudo escolhido no dropdown do painel de controles e
+  // reflete a mudança na Homepage (seção "Progresso") sem recarregar a página.
+  function handleStatusChanged(filename: string, nextStatus: string) {
+    setLibraryNotes((prev) => prev.map((note) => (note.filename === filename ? { ...note, status: nextStatus } : note)));
+    vaultFetch("/api/note/status", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, status: nextStatus }),
+    });
+  }
+
+  function toggleGraphPanel() {
+    setShowGraph((prev) => !prev);
+  }
+
+  function setGraphScopeSafe(scope: "local" | "global") {
+    setGraphScope(scope);
+    // Radial só faz sentido com um nó central (escopo local).
+    if (scope === "global" && graphLayout === "radial") {
+      setGraphLayout("force");
+    }
+  }
+
+  // Refaz a busca do grafo sempre que o painel está aberto e o escopo (ou a nota
+  // em foco, quando o escopo é local) muda. Layout é só uma escolha de desenho —
+  // não precisa buscar dados de novo quando ele muda.
+  useEffect(() => {
+    if (!showGraph) return;
+
+    const params = new URLSearchParams();
+    if (graphScope === "local" && focusedFilename) {
+      params.set("scope", "local");
+      params.set("filename", focusedFilename);
+    } else {
+      params.set("scope", "global");
     }
 
-    const frame = requestAnimationFrame(recalcularBaloes);
-
-    // O CodeMirror dispara scroll no elemento ".cm-scroller" interno,
-    // não no wrapper externo — precisamos escutar ali especificamente.
-    window.addEventListener("scroll", recalcularBaloes, true); // true = captura em qualquer ancestral que role
-    window.addEventListener("resize", recalcularBaloes);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("scroll", recalcularBaloes, true);
-      window.removeEventListener("resize", recalcularBaloes);
-    };
-  }, [content, activeNote]);
-
-  // Roda uma vez ao abrir a página: busca a lista de notas
-  useEffect(() => {
-    fetch("/api/notes")
+    const requestedVaultId = activeVaultId;
+    vaultFetch(`/api/graph?${params.toString()}`)
       .then((res) => res.json())
       .then((data) => {
-        if (data.notes) {
-          setNotes(data.notes);
-          // Abre a primeira nota automaticamente, se existir
-          if (data.notes.length > 0) {
-            setActiveNote(data.notes[0]);
-          }
-        }
+        if (activeVaultIdRef.current !== requestedVaultId) return; // vault já trocou; resposta obsoleta
+        if (data.nodes) setGraphData({ nodes: data.nodes, edges: data.edges ?? [] });
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showGraph, graphScope, focusedFilename, activeVaultId]);
+
+  // Busca a lista de tags já conhecidas no vault — alimenta o autocomplete do
+  // TagField. Refeita depois de qualquer mudança de tags pra incluir as novas.
+  function refreshAllTags() {
+    const requestedVaultId = activeVaultId;
+    vaultFetch("/api/tags")
+      .then((res) => res.json())
+      .then((data) => {
+        if (activeVaultIdRef.current !== requestedVaultId) return; // vault já trocou; resposta obsoleta
+        if (data.tagCounts) setAllTags((data.tagCounts as [string, number][]).map(([tag]) => tag));
+      });
+  }
+
+  useEffect(() => {
+    if (!activeVaultId) return;
+    refreshAllTags();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeVaultId]);
+
+  function toggleTagGroup(key: string) {
+    setExpandedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // Agrupa libraryNotes por tag (uma nota com N tags aparece em N grupos — não
+  // existe "tag principal"), filtrando por busca (título ou tag, não corpo do
+  // texto). Grupos em ordem alfabética; "Sem tag" sempre por último.
+  const sidebarGroups = useMemo(() => {
+    const q = sidebarSearch.trim().toLowerCase();
+    const matches = libraryNotes.filter((note) => {
+      if (!q) return true;
+      if (note.title.toLowerCase().includes(q)) return true;
+      return note.tags.some((t) => t.toLowerCase().includes(q));
+    });
+
+    const byTag = new Map<string, LibraryNote[]>();
+    const untagged: LibraryNote[] = [];
+    for (const note of matches) {
+      if (note.tags.length === 0) {
+        untagged.push(note);
+        continue;
+      }
+      for (const tag of note.tags) {
+        const list = byTag.get(tag) ?? [];
+        list.push(note);
+        byTag.set(tag, list);
+      }
+    }
+
+    const tagGroups = Array.from(byTag.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([tag, groupNotes]) => ({ key: tag, label: tag, notes: groupNotes }));
+
+    return [...tagGroups, { key: UNTAGGED_GROUP_KEY, label: "Sem tag", notes: untagged }];
+  }, [libraryNotes, sidebarSearch]);
+
+  function toggleTheme() {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      if (next === "light") {
+        document.documentElement.dataset.theme = "light";
+      } else {
+        delete document.documentElement.dataset.theme;
+      }
+      localStorage.setItem("theme", next);
+      return next;
+    });
+  }
+
+  // Sempre injeta o vault ativo na URL — usado no lugar de fetch() cru em toda
+  // chamada às rotas vault-aware, pra nunca esquecer o parâmetro num dos ~35
+  // call sites do app (ver src/lib/vaultContext.tsx). Memoizado (referência
+  // só muda quando activeVaultId muda) pra poder entrar em array de
+  // dependência de efeitos sem causar reexecuções espúrias a cada render.
+  const vaultFetch = useCallback(
+    (url: string, init?: RequestInit): Promise<Response> => {
+      if (!activeVaultId) return Promise.reject(new Error("Nenhum vault ativo"));
+      return fetch(appendVaultParam(url, activeVaultId), init);
+    },
+    [activeVaultId]
+  );
+
+  // Troca de vault: reseta todo o estado "por vault" (painéis abertos, busca,
+  // Graph View) e persiste a escolha — o efeito logo abaixo, que depende de
+  // [activeVaultId], cuida de rebuscar noteTargets/library do vault novo.
+  function switchVault(id: string) {
+    setActiveVaultId(id);
+    localStorage.setItem("activeVaultId", id);
+    setPanelA(null);
+    setPanelB(null);
+    setSplitMode(false);
+    setFocusedPanel("a");
+    setHomeView({ kind: "library" });
+    setShowGraph(false);
+    setSidebarSearch("");
+  }
+
+  // Só troca o rótulo de exibição do vault (ver renameVault em vaultRegistry.ts)
+  // — atualiza a lista local sem precisar rebuscar tudo do servidor.
+  async function renameVaultEntry(id: string, name: string) {
+    const res = await fetch("/api/vaults", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name }),
+    });
+    const data = await res.json();
+    if (data.vault) {
+      setVaults((prev) => prev.map((v) => (v.id === id ? data.vault : v)));
+    }
+  }
+
+  // Carrega a lista de vaults uma única vez ao abrir o app (rota vault-agnóstica,
+  // não passa por vaultFetch), e decide qual fica ativo: o último usado
+  // (localStorage), se ainda existir na lista, ou o primeiro vault conhecido
+  // (cobre o bootstrap automático do vault "Principal").
+  useEffect(() => {
+    fetch("/api/vaults")
+      .then((res) => res.json())
+      .then((data) => {
+        const list: VaultEntry[] = data.vaults ?? [];
+        setVaults(list);
+        if (list.length === 0) return;
+        const stored = localStorage.getItem("activeVaultId");
+        const initial = stored && list.some((v) => v.id === stored) ? stored : list[0].id;
+        setActiveVaultId(initial);
       });
   }, []);
 
+  // Mantém o ImageWidget (livePreview.ts) sabendo qual vault está ativo — ver
+  // comentário lá sobre por que isso não pode vir de um Contexto React.
   useEffect(() => {
-    function handleIconClick(e: Event) {
-      const detail = (e as CustomEvent).detail as {
-        tipo: string;
-        modo: "fundo" | "sublinhado";
-        from: number;
-        to: number;
-      };
+    if (activeVaultId) setLivePreviewVaultId(activeVaultId);
+  }, [activeVaultId]);
 
-      const view = editorViewRef.current;
-      if (!view) return;
-
-      setEditingHighlight(detail);
-      const coords = view.coordsAtPos(detail.to);
-      if (coords) {
-        setMenuPos({ x: coords.left, y: coords.bottom + 6 });
-      }
-    }
-
-    const dom = editorViewRef.current?.dom;
-    dom?.addEventListener("highlight-icon-click", handleIconClick);
-    return () => dom?.removeEventListener("highlight-icon-click", handleIconClick);
-  }, [activeNote]); // re-registra quando troca de nota (o editor é recriado)
-  
-  // Roda toda vez que "activeNote" muda: busca o conteúdo daquela nota
-  useEffect(() => {
-    if (!activeNote) return;
-
-    setStatus("Carregando...");
-    fetch(`/api/note?filename=${encodeURIComponent(activeNote)}`)
+  function fetchNoteTargets() {
+    const requestedVaultId = activeVaultId;
+    vaultFetch("/api/note-targets")
       .then((res) => res.json())
       .then((data) => {
-        if (data.content !== undefined) {
-          setContent(data.content);
-          setStatus("Carregado.");
-        } else {
-          setStatus("Erro ao carregar: " + data.error);
-        }
+        if (activeVaultIdRef.current !== requestedVaultId) return; // vault já trocou; resposta obsoleta
+        if (data.targets) setNoteTargets(data.targets);
       });
-  }, [activeNote]);
+  }
+
+  // Dados da tela de biblioteca — mesmo timing de atualização do fetchNoteTargets
+  // acima (uma vez ao abrir a página, e de novo depois de cada save/rename/create).
+  function fetchLibraryData() {
+    const requestedVaultId = activeVaultId;
+    vaultFetch("/api/library")
+      .then((res) => res.json())
+      .then((data) => {
+        if (activeVaultIdRef.current !== requestedVaultId) return; // vault já trocou; resposta obsoleta
+        if (data.notes) setLibraryNotes(data.notes);
+      });
+  }
+
+  function handleLibraryChanged() {
+    fetchNoteTargets();
+    fetchLibraryData();
+  }
+
+  // Roda de novo sempre que o vault ativo muda (inclusive a primeira vez que
+  // ele é resolvido), e de novo depois de cada save (pra refletir
+  // título/aliases/notas novas na hora, sem precisar recarregar a página).
   useEffect(() => {
-    const view = editorViewRef.current;
-    if (!view) return;
-    view.dispatch({ effects: setActiveCommentEffect.of(activeCommentId) });
-  }, [activeCommentId]);
+    if (!activeVaultId) return;
+    fetchNoteTargets();
+    fetchLibraryData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeVaultId]);
 
-  async function handleSave() {
-    if (!activeNote) return;
+  // Abre uma nota num painel, decidindo qual: fora do modo dividido é sempre o
+  // painel A; dividido, prioriza o painel vazio e, se os dois já tiverem nota,
+  // usa o painel que estava em foco por último. Também troca pra visão de
+  // editor, já que abrir uma nota faz sentido a partir de qualquer tela
+  // (biblioteca, lista de tema, etc.).
+  function openNoteInPanel(filename: string): "a" | "b" {
+    // Só atualiza a "página anterior" ao vir de fora do editor — trocar de
+    // nota enquanto já se está no editor não deve mexer no destino do "Voltar".
+    if (homeView.kind !== "editor") setPreviousHomeView(homeView);
+    setHomeView({ kind: "editor" });
+    if (!splitMode) {
+      setPanelA(filename);
+      setFocusedPanel("a");
+      return "a";
+    }
+    const target: "a" | "b" = panelB === null ? "b" : panelA === null ? "a" : focusedPanel;
+    if (target === "a") setPanelA(filename);
+    else setPanelB(filename);
+    setFocusedPanel(target);
+    return target;
+  }
 
-    setStatus("Salvando...");
-    const res = await fetch("/api/note", {
+  function handleToggleSplit() {
+    if (splitMode) {
+      // Mesma ação do × do painel B: fecha a divisão, mantém o painel A.
+      setSplitMode(false);
+      setPanelB(null);
+      setFocusedPanel("a");
+    } else {
+      setSplitMode(true);
+    }
+  }
+
+  function closePanelB() {
+    setSplitMode(false);
+    setPanelB(null);
+    setFocusedPanel("a");
+  }
+
+  function closePanelA() {
+    // Promove o painel B pra posição de A antes de sair da divisão.
+    setPanelA(panelB);
+    setPanelB(null);
+    setSplitMode(false);
+    setFocusedPanel("a");
+  }
+
+  // Renomeia uma nota a partir da sidebar — não necessariamente a nota aberta
+  // num painel. Se estiver aberta em A e/ou B, grava a edição pendente daquele
+  // painel ANTES de renomear (senão uma edição não salva pode se perder ou ser
+  // salva com o nome errado), e atualiza o painel pro novo nome depois.
+  async function renameSidebarNote(filename: string, newTitleRaw: string) {
+    const trimmed = newTitleRaw.trim();
+    const currentTitle = stripMdExtension(filename);
+    if (!trimmed || trimmed === currentTitle) {
+      setRenamingKey(null);
+      return;
+    }
+
+    const isInA = filename === panelA;
+    const isInB = filename === panelB;
+    if (isInA) await panelARef.current?.flushPendingSave();
+    if (isInB) await panelBRef.current?.flushPendingSave();
+
+    const res = await vaultFetch("/api/note/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: activeNote, content }),
+      body: JSON.stringify({ oldFilename: filename, newTitle: trimmed }),
     });
     const data = await res.json();
-    setStatus(data.success ? "Salvo!" : "Erro ao salvar: " + data.error);
-  }
-// Extensão do CodeMirror: observa mudanças de seleção
-  const selectionWatcher = EditorView.updateListener.of((update) => {
-    if (update.selectionSet) {
-      const sel = update.state.selection.main;
-
-      if (sel.empty) {
-        setMenuPos(null);
-        setEditingHighlight(null);
-        return;
-      }
-
-      // Proteção: impede criar highlight se a seleção colide com um highlight
-      // OU um comentário já existente — evita sintaxe aninhada/corrompida.
-      const overlapsHighlight =
-        findHighlightAt(update.view, sel.from) || findHighlightAt(update.view, sel.to);
-      const overlapsComment =
-        findCommentAt(update.view, sel.from) || findCommentAt(update.view, sel.to);
-
-      if (overlapsHighlight || overlapsComment) {
-        setMenuPos(null);
-        setEditingHighlight(null);
-        return;
-      }
-
-      setEditingHighlight(null);
-      const coords = update.view.coordsAtPos(sel.head);
-      if (coords) {
-        setMenuPos({ x: coords.left, y: coords.bottom + 6 });
-      }
+    if (!data.filename) {
+      window.alert(data.error ?? "desconhecido");
+      setRenamingKey(null);
+      return;
     }
-  });
 
-  const commentClickHandler = EditorView.domEventHandlers({
-    mousedown(event, view) {
-      const target = event.target as HTMLElement;
-      const anchorEl = target.closest(".comment-anchor") as HTMLElement | null;
-      if (anchorEl) {
-        const commentId = anchorEl.getAttribute("data-comment-id");
-        if (commentId) {
-          event.preventDefault();
-          setActiveCommentId(commentId);
-          return true; // marca o evento como tratado, evita posicionar cursor ali
-        }
-      }
-      return false;
-    },
-  });
+    const newFilename: string = data.filename;
+    setRenamingKey(null);
+    fetchNoteTargets();
+    fetchLibraryData();
+    if (isInA) setPanelA(newFilename);
+    if (isInB) setPanelB(newFilename);
+  }
 
-  function applyHighlight(tipo: string, modo: "fundo" | "sublinhado") {
-    const view = editorViewRef.current;
-    if (!view) return;
+  // Só abre o modal de confirmação — a exclusão de verdade acontece em
+  // performDeleteNote, chamada depois que o usuário confirma no modal.
+  function requestDeleteNote(filename: string) {
+    setConfirmDelete({ filename });
+  }
 
-    const suffix = modo === "sublinhado" ? ":sub" : "";
+  // Núcleo de "apagar 1 arquivo": chama a rota DELETE (que já cuida do índice
+  // SQLite via ON DELETE CASCADE/SET NULL) e fecha o painel A/B se a nota
+  // apagada estava aberta neles — sem mexer na biblioteca/noteTargets, que quem
+  // chama recarrega uma única vez no final (importa pro caso de lote, onde
+  // recarregar a cada arquivo apagado seria redundante). Devolve se deu certo.
+  async function deleteNoteFileOnly(filename: string): Promise<boolean> {
+    const isInA = filename === panelA;
+    const isInB = filename === panelB;
+    if (isInA) panelARef.current?.cancelPendingSave();
+    if (isInB) panelBRef.current?.cancelPendingSave();
 
-    if (editingHighlight) {
-      // Modo editar: substitui o highlight existente por um novo tipo/modo
-      const innerText = view.state.doc.sliceString(
-        editingHighlight.from + 2,
-        view.state.doc.toString().indexOf("==", editingHighlight.from + 2)
-      );
-      const newText = `==${innerText}==§${tipo}${suffix}`;
-      const newCursorPos = editingHighlight.from + newText.length;
+    const res = await vaultFetch(`/api/note?filename=${encodeURIComponent(filename)}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!data.success) return false;
 
-      view.dispatch({
-        changes: { from: editingHighlight.from, to: editingHighlight.to, insert: newText },
-        selection: EditorSelection.cursor(newCursorPos),
-      });
+    if (isInA) {
+      setPanelA(null);
+      if (!splitMode) setHomeView({ kind: "library" });
+    }
+    if (isInB) setPanelB(null);
+    return true;
+  }
 
-      // Atualiza imediatamente o estado de edição com os novos dados,
-      // em vez de esperar passivamente o próximo evento de seleção.
-      const updated = findHighlightAt(view, newCursorPos);
-      setEditingHighlight(updated);
+  // Apaga a nota do disco pra valer (ação irreversível).
+  async function performDeleteNote(filename: string) {
+    const ok = await deleteNoteFileOnly(filename);
+    if (!ok) {
+      window.alert("Não foi possível apagar a nota");
+      return;
+    }
+    fetchNoteTargets();
+    fetchLibraryData();
+  }
 
-      if (updated) {
-        const coords = view.coordsAtPos(newCursorPos);
-        if (coords) {
-          setMenuPos({ x: coords.left, y: coords.bottom + 6 });
-        }
-      }
+  // Só abre o modal de confirmação em lote — a exclusão de verdade acontece em
+  // performDeleteMultiple, chamada depois que o usuário confirma no modal.
+  function requestDeleteMultiple(filenames: string[]) {
+    if (filenames.length === 0) return;
+    setConfirmBulkDelete({ filenames });
+  }
 
-      view.focus();
-      return; // sai aqui, não executa o resto da função
-    } else {
-      // Modo criar: envolve o texto selecionado
-      const sel = view.state.selection.main;
-      if (sel.empty) return;
-
-      const selectedText = view.state.doc.sliceString(sel.from, sel.to);
-      const newText = `==${selectedText}==§${tipo}${suffix}`;
-
-      view.dispatch({
-        changes: { from: sel.from, to: sel.to, insert: newText },
-        selection: EditorSelection.cursor(sel.from + newText.length),
-      });
-
-      setMenuPos(null);
-      view.focus();
+  // Apaga várias notas de uma vez (ação irreversível) — recarrega a biblioteca
+  // uma única vez no final, não a cada arquivo.
+  async function performDeleteMultiple(filenames: string[]) {
+    const results = await Promise.all(filenames.map(deleteNoteFileOnly));
+    fetchNoteTargets();
+    fetchLibraryData();
+    const failedCount = results.filter((ok) => !ok).length;
+    if (failedCount > 0) {
+      window.alert(`${failedCount} de ${filenames.length} notas não puderam ser apagadas.`);
     }
   }
 
-  // Verifica se a posição "pos" está dentro de um highlight ==texto==§tipo existente.
-  // Se sim, devolve { from, to, tipo, modo } do trecho completo (== até §tipo[:sub]).
-  function findHighlightAt(view: EditorView, pos: number) {
-    const text = view.state.doc.toString();
-    const regex = /==(.+?)==§(\w+)(:sub)?/g;
-    let match: RegExpExecArray | null;
+  // Renomear disparado a partir de um card na Homepage/lista de tag: abre a
+  // nota no painel certo e foca/seleciona o campo de título assim que ele
+  // estiver montado.
+  function handleRenameFromCard(filename: string) {
+    const target = openNoteInPanel(filename);
+    if (target === "a") panelARef.current?.focusTitle();
+    else panelBRef.current?.focusTitle();
+  }
 
-    while ((match = regex.exec(text)) !== null) {
-      const start = match.index;
-      const end = start + match[0].length;
-      if (pos >= start && pos <= end) {
-        return {
-          from: start,
-          to: end,
-          tipo: match[2],
-          modo: (match[3] ? "sublinhado" : "fundo") as "fundo" | "sublinhado",
-        };
+  // Distingue "clique, espera, clique de novo" (entra em modo renomear) de um
+  // duplo-clique rápido no mesmo item (deve só reabrir a nota, sem renomear).
+  function handleSidebarNoteClick(key: string, filename: string) {
+    const now = Date.now();
+    const last = lastNoteClickRef.current;
+    const isOpenSomewhere = filename === panelA || filename === panelB;
+    if (last && last.filename === filename && isOpenSomewhere && now - last.time > 400 && now - last.time < 2500) {
+      lastNoteClickRef.current = null;
+      setRenameDraft(stripMdExtension(filename));
+      setRenamingKey(key);
+      return;
+    }
+    lastNoteClickRef.current = { filename, time: now };
+    openNoteInPanel(filename);
+  }
+
+  // Atalho global (não é um keymap do CodeMirror — precisa funcionar em
+  // qualquer lugar do app, não só com o editor focado): Alt+N cria nota em
+  // branco direto, sem passar pelo menu "+".
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        handleCreateBlank();
       }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Escape sai da tela cheia do Graph View (volta pro painel lateral) em vez de
+  // fechar o painel inteiro — mesmo padrão de outros popovers/menus do app.
+  useEffect(() => {
+    if (!graphFullscreen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setGraphFullscreen(false);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [graphFullscreen]);
+
+  // Cria a nota a partir de um "[[link]]" pra um título ainda inexistente,
+  // clicado dentro de um painel — a criação em si é uma operação global
+  // (precisa atualizar noteTargets/library), mas quem decide o que fazer com o
+  // resultado (navegar até lá) é o próprio painel que disparou o clique.
+  async function handleCreateNoteFromLink(title: string): Promise<string | null> {
+    const res = await vaultFetch("/api/note/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    const data = await res.json();
+    if (data.filename) {
+      fetchNoteTargets();
+      fetchLibraryData();
+      return data.filename;
     }
     return null;
   }
 
-    // Verifica se a posição "pos" está dentro de um comentário ancorado existente.
-  function findCommentAt(view: EditorView, pos: number): boolean {
-    const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}/g;
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text)) !== null) {
-      const start = match.index;
-      const end = start + match[0].length;
-      if (pos >= start && pos <= end) {
-        return true;
-      }
+  // Abre o menu "+" (Nota em branco / Importar) ancorado no botão que disparou.
+  // "up-left" (usado pelo FAB no canto inferior direito da tela) cresce a
+  // partir do canto superior-esquerdo do gatilho, pra não nascer fora da tela.
+  function openNewNoteMenu(rect: DOMRect, direction: "down-right" | "up-left" = "down-right") {
+    if (direction === "up-left") {
+      setNewNoteMenuAnchor({ x: rect.left, y: rect.top - 6, direction });
+    } else {
+      setNewNoteMenuAnchor({ x: rect.left, y: rect.bottom + 6, direction });
     }
-    return false;
   }
 
-  // Extrai todos os comentários do texto atual, com posição, tipo e conteúdo.
-  function listComments(text: string) {
-    const regex = /~(.+?)~¶(\w+){([^}]*)}/g;
-    const results: { from: number; to: number; tipo: string; anchorText: string; comentario: string }[] = [];
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text)) !== null) {
-      results.push({
-        from: match.index,
-        to: match.index + match[0].length,
-        tipo: match[2],
-        anchorText: match[1],
-        comentario: match[3],
+  // Ctrl/Alt+N e o item "Nota em branco" do menu "+" caem aqui direto —
+  // mesma rota que handleCreateNoteFromLink, mas com "blank: true" (sem H1 no corpo).
+  // Guarda contra clique duplo/repetido enquanto a criação ainda está em
+  // andamento (sem isso, cliques repetidos — ex: por a requisição demorar e
+  // parecer que "nada aconteceu" — disparam uma criação por clique, todas
+  // resolvendo de uma vez quando a resposta finalmente chega).
+  async function handleCreateBlank() {
+    if (creatingBlankNote) return;
+    setNewNoteMenuAnchor(null);
+    setCreatingBlankNote(true);
+    try {
+      const res = await vaultFetch("/api/note/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Sem título", blank: true }),
       });
+      const data = await res.json();
+      if (data.filename) {
+        fetchNoteTargets();
+        fetchLibraryData();
+        const target = openNoteInPanel(data.filename);
+        (target === "a" ? panelARef : panelBRef).current?.focusTitle();
+      }
+    } finally {
+      setCreatingBlankNote(false);
     }
-    return results;
-  }  
+  }
 
-    function removeHighlight() {
-    const view = editorViewRef.current;
-    if (!view || !editingHighlight) return;
+  function handleImportClick() {
+    setNewNoteMenuAnchor(null);
+    importFileInputRef.current?.click();
+  }
 
-    const innerText = view.state.doc.sliceString(
-      editingHighlight.from + 2,
-      view.state.doc.toString().indexOf("==", editingHighlight.from + 2)
+  function handleImportWebClick() {
+    setNewNoteMenuAnchor(null);
+    setImportWebUrl("");
+    setImportWebOpen(true);
+  }
+
+  // Usado tanto pelo <input type="file"> (nos 3 gatilhos do menu "+") quanto
+  // pelo arrastar-e-soltar na Biblioteca — um único caminho de conversão.
+  async function handleFileSelected(file: File) {
+    setImportingMessage("Convertendo arquivo...");
+    setImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await vaultFetch("/api/note/import", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!data.filename) {
+        window.alert(data.error ?? "Não foi possível converter o arquivo");
+        return;
+      }
+      fetchNoteTargets();
+      fetchLibraryData();
+      openNoteInPanel(data.filename);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  // Mantém o modal de URL aberto em caso de erro (pra tentar de novo sem
+  // reescrever a URL) — só fecha quando a importação dá certo.
+  async function handleImportWebSubmit(url: string) {
+    setImportingMessage("Extraindo artigo...");
+    setImporting(true);
+    try {
+      const res = await vaultFetch("/api/note/import-web", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!data.filename) {
+        window.alert(data.error ?? "Não foi possível importar o artigo");
+        return;
+      }
+      setImportWebOpen(false);
+      setImportWebUrl("");
+      fetchNoteTargets();
+      fetchLibraryData();
+      openNoteInPanel(data.filename);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  // Conteúdo do painel do Graph View — montado uma única vez e reaproveitado
+  // tanto no painel lateral de 420px quanto no overlay de tela cheia (ver mais
+  // abaixo), pra não duplicar o <GraphView> (e a simulação por trás dele) nos
+  // dois lugares ao mesmo tempo.
+  const graphPanelBody = (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+        <h2 style={{ fontSize: "1.1rem" }}>Graph view</h2>
+        <button
+          onClick={() => {
+            setShowGraph(false);
+            setGraphFullscreen(false);
+          }}
+          style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "1.2rem", color: "var(--foreground)" }}
+        >
+          ×
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", border: "1px solid var(--panel-border)", borderRadius: "4px", overflow: "hidden" }}>
+          <button
+            onClick={() => setGraphScopeSafe("local")}
+            disabled={!focusedFilename}
+            style={{
+              padding: "0.3rem 0.6rem",
+              background: graphScope === "local" ? "var(--panel-hover)" : "transparent",
+              border: "none",
+              cursor: focusedFilename ? "pointer" : "not-allowed",
+              opacity: focusedFilename ? 1 : 0.5,
+              fontSize: "0.8rem",
+              color: "var(--foreground)",
+            }}
+          >
+            Local
+          </button>
+          <button
+            onClick={() => setGraphScopeSafe("global")}
+            style={{
+              padding: "0.3rem 0.6rem",
+              background: graphScope === "global" ? "var(--panel-hover)" : "transparent",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              color: "var(--foreground)",
+            }}
+          >
+            Global
+          </button>
+        </div>
+
+        <div style={{ display: "flex", border: "1px solid var(--panel-border)", borderRadius: "4px", overflow: "hidden" }}>
+          <button
+            onClick={() => setGraphLayout("force")}
+            style={{
+              padding: "0.3rem 0.6rem",
+              background: graphLayout === "force" ? "var(--panel-hover)" : "transparent",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              color: "var(--foreground)",
+            }}
+          >
+            Força
+          </button>
+          <button
+            onClick={() => setGraphLayout("radial")}
+            disabled={graphScope === "global"}
+            style={{
+              padding: "0.3rem 0.6rem",
+              background: graphLayout === "radial" ? "var(--panel-hover)" : "transparent",
+              border: "none",
+              cursor: graphScope === "global" ? "not-allowed" : "pointer",
+              opacity: graphScope === "global" ? 0.5 : 1,
+              fontSize: "0.8rem",
+              color: "var(--foreground)",
+            }}
+          >
+            Radial
+          </button>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <GraphView
+          nodes={graphData.nodes}
+          edges={graphData.edges}
+          layoutMode={graphLayout}
+          scope={graphScope}
+          centerFilename={graphScope === "local" ? focusedFilename ?? undefined : undefined}
+          activeNoteFilename={focusedFilename ?? undefined}
+          onSelectNote={(filename) => openNoteInPanel(filename)}
+          isFullscreen={graphFullscreen}
+          onToggleFullscreen={() => setGraphFullscreen((v) => !v)}
+        />
+      </div>
+    </>
+  );
+
+  // Ainda buscando /api/vaults (ou nenhum vault existe, caso impossível na
+  // prática — createVault sempre garante ao menos o bootstrap "Principal") —
+  // evita renderizar o app inteiro tentando disparar vaultFetch sem vault.
+  if (!activeVaultId) {
+    return (
+      <main style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", color: "var(--text-muted)" }}>
+        Carregando...
+      </main>
     );
-
-    view.dispatch({
-      changes: { from: editingHighlight.from, to: editingHighlight.to, insert: innerText },
-      selection: EditorSelection.cursor(editingHighlight.from + innerText.length),
-    });
-
-    setEditingHighlight(null);
-    setMenuPos(null);
-    view.focus();
-  }
-
-  function startComment(tipo: string) {
-    const view = editorViewRef.current;
-    if (!view) return;
-    const sel = view.state.selection.main;
-    if (sel.empty) return;
-    setCommentDraft({ tipo, from: sel.from, to: sel.to, mode: "create" });
-    setMenuPos(null);
-  }
-
-  function insertCallout(tipo: string) {
-    const view = editorViewRef.current;
-    if (!view) return;
-
-    const cursor = view.state.selection.main.head;
-    const line = view.state.doc.lineAt(cursor);
-
-    // Insere o bloco callout depois da linha atual
-    const insertPos = line.to;
-    const calloutText = `\n> [!${tipo}]\n> `;
-
-    view.dispatch({
-      changes: { from: insertPos, to: insertPos, insert: calloutText },
-      selection: EditorSelection.cursor(insertPos + calloutText.length),
-    });
-
-    setShowCalloutMenu(false);
-    view.focus();
-  }
-
-  // Abre o modal pré-preenchido para editar um comentário já existente
-  function editComment(from: number) {
-    const view = editorViewRef.current;
-    if (!view) return;
-    const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}/g;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index === from) {
-        setCommentDraft({
-          tipo: match[2],
-          from: match.index,
-          to: match.index + match[0].length,
-          mode: "edit",
-          anchorText: match[1],
-          initialText: match[3],
-        });
-        return;
-      }
-    }
-  }
-
-  // Remove a sintaxe do comentário, devolvendo só o texto ancorado puro
-  function deleteComment(from: number) {
-    const view = editorViewRef.current;
-    if (!view) return;
-    const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}/g;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index === from) {
-        const anchorText = match[1];
-        view.dispatch({
-          changes: { from: match.index, to: match.index + match[0].length, insert: anchorText },
-        });
-        view.focus();
-        return;
-      }
-    }
-  }
-
-  function confirmComment(texto: string) {
-    const view = editorViewRef.current;
-    if (!view || !commentDraft) return;
-
-    // No modo "edit", o texto ancorado já é conhecido (anchorText);
-    // no modo "create", precisamos lê-lo da seleção original (from/to ainda apontam pro texto puro).
-    const anchorText =
-      commentDraft.mode === "edit"
-        ? commentDraft.anchorText!
-        : view.state.doc.sliceString(commentDraft.from, commentDraft.to);
-
-    const newText = `~${anchorText}~¶${commentDraft.tipo}{${texto}}`;
-
-    view.dispatch({
-      changes: { from: commentDraft.from, to: commentDraft.to, insert: newText },
-      selection: EditorSelection.cursor(commentDraft.from + newText.length),
-    });
-
-    setCommentDraft(null);
-    view.focus();
   }
 
   return (
+    <VaultContext.Provider value={{ vaultId: activeVaultId, vaults, switchVault, renameVault: renameVaultEntry, vaultFetch }}>
     <main style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
       {/* Barra de ferramentas fixa */}
       <header
@@ -508,348 +942,579 @@ export default function Home() {
           alignItems: "center",
           gap: "0.5rem",
           padding: "0.5rem 1rem",
-          borderBottom: "1px solid #ccc",
+          borderBottom: "1px solid var(--panel-border)",
           position: "relative",
         }}
       >
-        <strong style={{ marginRight: "1rem" }}>Meu App de Estudo</strong>
-
-        {/* Botão de inserir callout */}
-        <div style={{ position: "relative" }}>
+        {/* Volta pra exatamente a tela de onde a nota foi aberta (biblioteca,
+            lista de tag ou "todas as notas") — só aparece dentro do editor. */}
+        {homeView.kind === "editor" && (
           <button
-            onClick={() => setShowCalloutMenu((prev) => !prev)}
+            onClick={() => setHomeView(previousHomeView)}
+            className="toolbar-link"
+            title="Voltar"
             style={{
-              padding: "0.4rem 0.8rem",
-              background: showCalloutMenu ? "#eee" : "transparent",
-              border: "1px solid #ccc",
+              padding: "0.4rem 0.6rem",
+              border: "none",
               borderRadius: "4px",
               cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              color: "var(--foreground)",
             }}
           >
-            📦 Callout
+            <BackArrowIcon />
           </button>
+        )}
 
-          {showCalloutMenu && (
-            <div
+        {/* Título + link fixo de volta pra biblioteca, de qualquer lugar do app */}
+        <button
+          onClick={() => setHomeView({ kind: "library" })}
+          className="toolbar-link"
+          style={{
+            marginRight: "1rem",
+            padding: "0.3rem 0.5rem",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: "bold",
+            fontSize: "1.05rem",
+            color: "var(--foreground)",
+          }}
+        >
+          Minha Biblioteca
+        </button>
+
+        <VaultSwitcher
+          vaults={vaults}
+          activeVaultId={activeVaultId}
+          onSwitch={switchVault}
+          onRename={renameVaultEntry}
+          onCreated={(vault) => {
+            setVaults((prev) => [...prev, vault]);
+            switchVault(vault.id);
+          }}
+        />
+
+        {homeView.kind === "editor" && (
+          <>
+            <button
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              className="toolbar-link"
+              title={sidebarCollapsed ? "Expandir sidebar" : "Recolher sidebar"}
               style={{
-                position: "absolute",
-                top: "calc(100% + 4px)",
-                left: 0,
-                background: "white",
-                border: "1px solid #ccc",
-                borderRadius: "6px",
-                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-                padding: "0.5rem",
-                zIndex: 1000,
+                padding: "0.4rem 0.6rem",
+                background: sidebarCollapsed ? "var(--panel-hover)" : undefined,
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
                 display: "flex",
-                flexDirection: "column",
-                gap: "0.3rem",
-                minWidth: "160px",
+                alignItems: "center",
               }}
             >
-              {Object.entries(calloutColorsPalette).map(([tipo, cor]) => (
-                <button
-                  key={tipo}
-                  onClick={() => insertCallout(tipo)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    padding: "0.4rem 0.6rem",
-                    background: "transparent",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: "13px",
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "#f5f5f5")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                >
-                  <span
-                    style={{
-                      width: "12px",
-                      height: "12px",
-                      borderRadius: "50%",
-                      background: cor,
-                      flexShrink: 0,
-                    }}
-                  />
-                  {tipo}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+              <SidebarToggleIcon />
+            </button>
+            <button
+              onClick={handleToggleSplit}
+              className="toolbar-link"
+              style={{
+                padding: "0.4rem 0.8rem",
+                background: splitMode ? "var(--panel-hover)" : undefined,
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+            >
+              Dividir tela
+            </button>
+          </>
+        )}
 
         <button
-          onClick={() => setShowComments((prev) => !prev)}
+          onClick={toggleGraphPanel}
+          className="toolbar-link"
           style={{
             padding: "0.4rem 0.8rem",
-            background: showComments ? "#eee" : "transparent",
-            border: "1px solid #ccc",
+            background: showGraph ? "var(--panel-hover)" : undefined,
+            border: "none",
             borderRadius: "4px",
             cursor: "pointer",
           }}
         >
-          💬 Comentários
+          Graph view
         </button>
+
+        <button
+          onClick={(e) => openNewNoteMenu(e.currentTarget.getBoundingClientRect())}
+          className="toolbar-link"
+          title="Nova nota"
+          style={{
+            padding: "0.4rem 0.6rem",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <PlusIcon />
+        </button>
+
+        <button
+          onClick={toggleTheme}
+          className="toolbar-link"
+          title={theme === "dark" ? "Mudar para tema claro" : "Mudar para tema escuro"}
+          style={{
+            padding: "0.4rem 0.6rem",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+        </button>
+
+        {/* Só aparece dentro do editor — a Homepage já tem seu próprio botão
+            "Todas as notas" (ver LibraryHome), não precisa duplicar aqui.
+            marginLeft: auto separa ele do resto, no canto direito do header. */}
+        {homeView.kind === "editor" && (
+          <button
+            onClick={() => setHomeView({ kind: "allNotes" })}
+            className="toolbar-link"
+            style={{
+              marginLeft: "auto",
+              padding: "0.4rem 0.8rem",
+              border: "1px solid var(--panel-border)",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+          >
+            Todas as notas
+          </button>
+        )}
       </header>
 
-      {/* Conteúdo principal: notas + editor + (opcional) painel de comentários */}
-      <div style={{ display: "flex", flex: 1, overflow: "auto", minHeight: 0 }}>
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+      {homeView.kind === "library" && (
+        <LibraryHome
+          notes={libraryNotes}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onViewTag={(tag) => setHomeView({ kind: "tagList", tag })}
+          onViewAllNotes={() => setHomeView({ kind: "allNotes" })}
+          onViewStatus={(status) => setHomeView({ kind: "statusList", status })}
+          onOpenNewNoteMenu={openNewNoteMenu}
+          onFileDropped={handleFileSelected}
+          onCreateBlank={handleCreateBlank}
+          onImportClick={handleImportClick}
+          onImportWebClick={handleImportWebClick}
+          creatingBlankNote={creatingBlankNote}
+        />
+      )}
 
+      {homeView.kind === "tagList" && (
+        <TagNoteList
+          tag={homeView.tag}
+          notes={libraryNotes.filter((n) => (homeView.tag ? n.tags.includes(homeView.tag) : n.tags.length === 0))}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onDeleteMultiple={requestDeleteMultiple}
+        />
+      )}
+
+      {homeView.kind === "allNotes" && (
+        <TagNoteList
+          tag={null}
+          heading="Todas as notas"
+          notes={libraryNotes}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onDeleteMultiple={requestDeleteMultiple}
+        />
+      )}
+
+      {homeView.kind === "statusList" && (
+        <TagNoteList
+          tag={null}
+          heading={STATUS_LABELS[homeView.status] ?? homeView.status}
+          notes={libraryNotes.filter((n) => n.status === homeView.status)}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onDeleteMultiple={requestDeleteMultiple}
+        />
+      )}
+
+      {/* Conteúdo principal: notas + painel(éis) de nota */}
+      {homeView.kind === "editor" && (
+      <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
 
       <aside
         style={{
-          width: "220px",
-          borderRight: "1px solid #ccc",
-          padding: "1rem",
-          overflowY: "auto",
+          width: sidebarCollapsed ? "0px" : "240px",
+          flexShrink: 0,
+          borderRight: sidebarCollapsed ? "none" : "1px solid var(--panel-border)",
+          padding: sidebarCollapsed ? "0" : "1rem",
+          overflow: "hidden",
+          overflowY: sidebarCollapsed ? "hidden" : "auto",
+          transition: "width 0.18s ease, padding 0.18s ease",
         }}
       >
-        <h2 style={{ marginBottom: "1rem", fontSize: "1.1rem" }}>Notas</h2>
-        <ul style={{ listStyle: "none", padding: 0 }}>
-          {notes.map((note) => (
-            <li key={note} style={{ marginBottom: "0.5rem" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
+          <h2 style={{ fontSize: "1.1rem" }}>Notas</h2>
+          <button
+            onClick={(e) => openNewNoteMenu(e.currentTarget.getBoundingClientRect())}
+            className="toolbar-link"
+            title="Nova nota"
+            style={{
+              padding: "0.3rem",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+              color: "var(--text-muted)",
+              display: "flex",
+              alignItems: "center",
+            }}
+          >
+            <PlusIcon />
+          </button>
+        </div>
+
+        <div style={{ position: "relative", marginBottom: "1rem" }}>
+          <span
+            style={{
+              position: "absolute",
+              left: "0.6rem",
+              top: "50%",
+              transform: "translateY(-50%)",
+              color: "var(--text-muted)",
+              fontSize: "0.85rem",
+              pointerEvents: "none",
+            }}
+          >
+            <SearchIcon />
+          </span>
+          <input
+            value={sidebarSearch}
+            onChange={(e) => setSidebarSearch(e.target.value)}
+            placeholder="Buscar notas..."
+            style={{
+              width: "100%",
+              padding: "0.4rem 0.5rem 0.4rem 1.8rem",
+              background: "var(--panel-bg)",
+              border: "1px solid var(--panel-border)",
+              borderRadius: "4px",
+              color: "var(--foreground)",
+              fontSize: "0.85rem",
+              boxSizing: "border-box",
+            }}
+          />
+        </div>
+
+        {sidebarGroups.map((group) => {
+          const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(group.key);
+          return (
+            <div key={group.key} style={{ marginBottom: "0.25rem" }}>
               <button
-                onClick={() => setActiveNote(note)}
+                onClick={() => toggleTagGroup(group.key)}
+                className="toolbar-link"
                 style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
                   width: "100%",
-                  textAlign: "left",
-                  padding: "0.5rem",
-                  background: note === activeNote ? "#eee" : "transparent",
+                  padding: "0.4rem 0.3rem",
+                  background: "transparent",
                   border: "none",
                   cursor: "pointer",
+                  color: "var(--foreground)",
+                  fontSize: "0.85rem",
+                  borderRadius: "4px",
                 }}
               >
-                {note}
+                <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      transition: "transform 0.15s ease",
+                      transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                      fontSize: "0.75rem",
+                    }}
+                  >
+                    ›
+                  </span>
+                  {group.label}
+                </span>
+                <span style={{ color: "var(--text-muted)" }}>{group.notes.length}</span>
               </button>
-            </li>
-          ))}
-        </ul>
+
+              {isExpanded && (
+                <ul style={{ listStyle: "none", padding: 0, margin: "0.15rem 0 0.5rem 0" }}>
+                  {group.notes.map((note) => {
+                    const rowKey = `${group.key}::${note.filename}`;
+                    const isOpen = note.filename === panelA || note.filename === panelB;
+                    return (
+                    <li key={note.filename} style={{ marginBottom: "0.3rem" }}>
+                      {renamingKey === rowKey ? (
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onBlur={() => renameSidebarNote(note.filename, renameDraft)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              (e.target as HTMLInputElement).blur();
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              setRenamingKey(null);
+                            }
+                          }}
+                          style={{
+                            width: "100%",
+                            padding: "0.4rem 0.5rem 0.4rem 1.3rem",
+                            background: "var(--panel-bg)",
+                            border: "1px solid var(--panel-border)",
+                            borderRadius: "4px",
+                            color: "var(--foreground)",
+                            fontSize: "0.85rem",
+                            boxSizing: "border-box",
+                          }}
+                        />
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: "2px" }}>
+                          <button
+                            onClick={() => handleSidebarNoteClick(rowKey, note.filename)}
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              textAlign: "left",
+                              padding: "0.4rem 0.5rem 0.4rem 1.3rem",
+                              background: isOpen ? "var(--panel-hover)" : "transparent",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              color: "var(--foreground)",
+                              fontSize: "0.85rem",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {note.title}
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setNoteRowMenu({ x: rect.left, y: rect.bottom + 4, rowKey, filename: note.filename });
+                            }}
+                            className="toolbar-link"
+                            title="Opções"
+                            style={{
+                              flexShrink: 0,
+                              padding: "0.4rem 0.3rem",
+                              border: "none",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              color: "var(--text-muted)",
+                              display: "flex",
+                              alignItems: "center",
+                            }}
+                          >
+                            <MoreIcon />
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })}
       </aside>
 
-      {/* Área principal: editor */}
-      
-      <section ref={sectionRef} style={{ flex: 1, display: "flex", position: "relative" }}>
-        <div style={{ flex: 1, padding: "2rem", display: "flex", flexDirection: "column", position: "relative", minWidth: 0 }}>
-
-
-        <h1 style={{ marginBottom: "1rem" }}>{activeNote || "Nenhuma nota selecionada"}</h1>
-
-        <CodeMirror
-          value={content}
-          onChange={(value) => setContent(value)}
-          extensions={[
-            markdown({ extensions: GFM }),
-            syntaxHighlighting(customHighlightStyle),
-            livePreviewPlugin,
-            selectionWatcher,
-            activeCommentField,
-            commentClickHandler,
-          ]}
-          theme={basicLight}
-          height="100%"
-          style={{ fontSize: "14px" }}
-          basicSetup={{ lineNumbers: false, foldGutter: false }}
-          onCreateEditor={(view) => {
-            editorViewRef.current = view;
-          }}
+      {/* Área principal: painel(éis) de nota */}
+      <div style={{ display: "flex", flex: 1, minWidth: 0, minHeight: 0 }}>
+        <NotePanel
+          ref={panelARef}
+          filename={panelA}
+          theme={theme}
+          fontSize={fontSizeFor(panelA)}
+          isFontSizeOverridden={!!panelA && panelA in noteFontSizes}
+          noteFont={noteFontFor(panelA)}
+          isNoteFontOverridden={!!panelA && panelA in noteFontOverrides}
+          noteTargets={noteTargets}
+          allTags={allTags}
+          closable={splitMode}
+          onClose={closePanelA}
+          onFocus={() => setFocusedPanel("a")}
+          onFilenameChange={(next) => setPanelA(next)}
+          onLibraryChanged={handleLibraryChanged}
+          onTagsChanged={handleTagsChanged}
+          onStatusChanged={handleStatusChanged}
+          onFontSizeChange={handleFontSizeChange}
+          onToggleFontSizeOverride={handleToggleFontSizeOverride}
+          onNoteFontChange={handleNoteFontChange}
+          onToggleNoteFontOverride={handleToggleNoteFontOverride}
+          onCreateNoteFromLink={handleCreateNoteFromLink}
         />
-
-        <div style={{ marginTop: "1rem", display: "flex", gap: "1rem", alignItems: "center" }}>
-          <button onClick={handleSave} style={{ padding: "0.5rem 1rem" }}>
-            Salvar
-          </button>
-          <span>{status}</span>
-        </div>
-        </div>
-
-        <div style={{ width: "260px", flexShrink: 0, position: "relative", borderLeft: "1px dashed #eee" }}>
-          {balloonPositions.map((b, i) => (
-            <div
-              key={i}
-              onMouseEnter={() => setActiveCommentId(`${b.from}`)}
-              onMouseLeave={() => setActiveCommentId(null)}
-              onDoubleClick={() => editComment(b.from)}
-              style={{
-                position: "absolute",
-                top: `${b.top}px`,
-                left: "12px",
-                right: "12px",
-                padding: "0.5rem 0.7rem",
-                borderRadius: "10px",
-                background: underlineColorsPalette[b.tipo] ?? "#888",
-                color: "white",
-                fontSize: "12px",
-                boxShadow: activeCommentId === `${b.from}` ? "0 0 0 3px rgba(0,0,0,0.3)" : "0 1px 4px rgba(0,0,0,0.2)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.4rem" }}>
-                <span style={{ flex: 1 }}>{b.comentario}</span>
-                <div style={{ display: "flex", gap: "0.2rem", flexShrink: 0 }}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      editComment(b.from);
-                    }}
-                    title="Editar comentário"
-                    style={{
-                      background: "rgba(255,255,255,0.35)",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor: "pointer",
-                      padding: "4px",
-                      display: "flex",
-                      alignItems: "center",
-                    }}
-                  >
-                    <EditIcon />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteComment(b.from);
-                    }}
-                    title="Excluir comentário"
-                    style={{
-                      background: "rgba(255,255,255,0.35)",
-                      border: "none",
-                      borderRadius: "4px",
-                      cursor: "pointer",
-                      padding: "4px",
-                      display: "flex",
-                      alignItems: "center",
-                    }}
-                  >
-                    <TrashIcon />
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-        {menuPos && (
-          <HighlightMenu
-            x={menuPos.x}
-            y={menuPos.y}
-            onSelect={applyHighlight}
-            onRemove={editingHighlight ? removeHighlight : undefined}
-            onComment={editingHighlight ? undefined : startComment}
-            initialTipo={editingHighlight?.tipo}
-            initialModo={editingHighlight?.modo}
-          />
+        {splitMode && (
+          <>
+            <div style={{ width: "1px", flexShrink: 0, background: "var(--panel-border)" }} />
+            <NotePanel
+              ref={panelBRef}
+              filename={panelB}
+              theme={theme}
+              fontSize={fontSizeFor(panelB)}
+              isFontSizeOverridden={!!panelB && panelB in noteFontSizes}
+              noteFont={noteFontFor(panelB)}
+              isNoteFontOverridden={!!panelB && panelB in noteFontOverrides}
+              noteTargets={noteTargets}
+              allTags={allTags}
+              closable
+              onClose={closePanelB}
+              onFocus={() => setFocusedPanel("b")}
+              onFilenameChange={(next) => setPanelB(next)}
+              onLibraryChanged={handleLibraryChanged}
+              onTagsChanged={handleTagsChanged}
+              onStatusChanged={handleStatusChanged}
+              onFontSizeChange={handleFontSizeChange}
+              onToggleFontSizeOverride={handleToggleFontSizeOverride}
+              onNoteFontChange={handleNoteFontChange}
+              onToggleNoteFontOverride={handleToggleNoteFontOverride}
+              onCreateNoteFromLink={handleCreateNoteFromLink}
+            />
+          </>
         )}
+      </div>
 
-        {commentDraft && (
-          <CommentModal
-            tipo={commentDraft.tipo}
-            initialText={commentDraft.initialText}
-            onConfirm={confirmComment}
-            onCancel={() => setCommentDraft(null)}
-          />
-        )}
-       
-
-      {/* Painel lateral de comentários */}
-      {showComments && (
-        <aside
-          style={{
-            width: "280px",
-            borderLeft: "1px solid #ccc",
-            padding: "1rem",
-            overflowY: "auto",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-            <h2 style={{ fontSize: "1.1rem" }}>Comentários</h2>
-            <button
-              onClick={() => setShowComments(false)}
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "1.2rem" }}
-            >
-              ×
-            </button>
-          </div>
-
-          {listComments(content).length === 0 ? (
-            <p style={{ color: "#888", fontSize: "0.9rem" }}>Nenhum comentário ainda.</p>
-          ) : (
-            listComments(content).map((c, i) => (
-              <div
-                key={i}
-                onClick={() => {
-                  const view = editorViewRef.current;
-                  if (!view) return;
-                  view.dispatch({
-                    selection: EditorSelection.cursor(c.from),
-                    effects: EditorView.scrollIntoView(c.from, { y: "center" }),
-                  });
-                  view.focus();
-                }}
-                onDoubleClick={() => editComment(c.from)}
-                style={{
-                  marginBottom: "0.6rem",
-                  padding: "0.5rem 0.7rem",
-                  borderRadius: "10px",
-                  background: underlineColorsPalette[c.tipo] ?? "#888",
-                  color: "white",
-                  fontSize: "12px",
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
-                  <span style={{ fontWeight: "bold" }}>{c.tipo}</span>
-                  <div style={{ display: "flex", gap: "0.2rem" }}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        editComment(c.from);
-                      }}
-                      title="Editar comentário"
-                      style={{
-                        background: "rgba(255,255,255,0.35)",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        padding: "4px",
-                        display: "flex",
-                        alignItems: "center",
-                      }}
-                    >
-                      <EditIcon />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteComment(c.from);
-                      }}
-                      title="Excluir comentário"
-                      style={{
-                        background: "rgba(255,255,255,0.35)",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        padding: "4px",
-                        display: "flex",
-                        alignItems: "center",
-                      }}
-                    >
-                      <TrashIcon />
-                    </button>
-                  </div>
-                </div>
-                <div style={{ opacity: 0.9, marginBottom: "0.3rem" }}>&ldquo;{c.anchorText}&rdquo;</div>
-                <div>{c.comentario}</div>
-              </div>
-            ))
-          )}
-        </aside>
+      </div>
       )}
       </div>
+
+      <aside
+        style={{
+          width: showGraph && !graphFullscreen ? "420px" : "0px",
+          borderLeft: showGraph && !graphFullscreen ? "1px solid var(--panel-border)" : "none",
+          padding: showGraph && !graphFullscreen ? "1rem" : "0",
+          overflow: "hidden",
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          transition: "width 0.22s ease, padding 0.22s ease",
+        }}
+      >
+        {showGraph && !graphFullscreen && graphPanelBody}
+      </aside>
+
+      {showGraph && graphFullscreen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 3000,
+            background: GRAPH_SPACE_BACKGROUND,
+            padding: "1.25rem 1.5rem",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {graphPanelBody}
+        </div>
+      )}
+      </div>
+
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept=".pdf,.epub"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) handleFileSelected(file);
+        }}
+      />
+
+      {newNoteMenuAnchor && (
+        <NewNoteMenu
+          x={newNoteMenuAnchor.x}
+          y={newNoteMenuAnchor.y}
+          direction={newNoteMenuAnchor.direction}
+          onCreateBlank={handleCreateBlank}
+          onImportClick={handleImportClick}
+          onImportWebClick={handleImportWebClick}
+          onClose={() => setNewNoteMenuAnchor(null)}
+        />
+      )}
+
+      {importWebOpen && !importing && (
+        <ImportWebModal
+          url={importWebUrl}
+          onUrlChange={setImportWebUrl}
+          onSubmit={handleImportWebSubmit}
+          onCancel={() => {
+            setImportWebOpen(false);
+            setImportWebUrl("");
+          }}
+        />
+      )}
+
+      {importing && <ImportProgressModal message={importingMessage} />}
+
+      {noteRowMenu && (
+        <NoteRowMenu
+          x={noteRowMenu.x}
+          y={noteRowMenu.y}
+          onRename={() => {
+            setRenameDraft(stripMdExtension(noteRowMenu.filename));
+            setRenamingKey(noteRowMenu.rowKey);
+            setNoteRowMenu(null);
+          }}
+          onDelete={() => {
+            requestDeleteNote(noteRowMenu.filename);
+            setNoteRowMenu(null);
+          }}
+          onClose={() => setNoteRowMenu(null)}
+        />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title="Apagar nota"
+          message={`Apagar "${stripMdExtension(confirmDelete.filename)}"? Essa ação não pode ser desfeita.`}
+          confirmLabel="Excluir"
+          danger
+          onConfirm={() => {
+            performDeleteNote(confirmDelete.filename);
+            setConfirmDelete(null);
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
+
+      {confirmBulkDelete && (
+        <ConfirmModal
+          title="Apagar notas selecionadas"
+          message={`Excluir ${confirmBulkDelete.filenames.length} ${confirmBulkDelete.filenames.length === 1 ? "nota" : "notas"}? Essa ação não pode ser desfeita.`}
+          confirmLabel="Excluir"
+          danger
+          onConfirm={() => {
+            performDeleteMultiple(confirmBulkDelete.filenames);
+            setConfirmBulkDelete(null);
+          }}
+          onCancel={() => setConfirmBulkDelete(null)}
+        />
+      )}
     </main>
+    </VaultContext.Provider>
   );
 }

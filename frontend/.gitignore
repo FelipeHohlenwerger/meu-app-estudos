@@ -17,6 +17,15 @@
 /.next/
 /out/
 
+# local sqlite cache/index do vault (reconstruível, nunca fonte de verdade) —
+# hoje vive em ~/.study-app/index/ (fora do repo), .data/ é só resquício de
+# uma localização antiga. *.sqlite/*.db abaixo cobre qualquer índice que
+# venha a aparecer aqui por engano, não importa o caminho.
+/.data/
+*.sqlite
+*.sqlite3
+*.db
+
 # production
 /build
 
@@ -32,6 +41,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +49,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# tauri (empacotamento desktop) — /target e /gen também já são ignorados
+# dentro do próprio src-tauri/.gitignore; repetido aqui de propósito pra ficar
+# explícito num único lugar (é onde o AppImage final também fica, dentro de
+# target/release/bundle/appimage/ — *.AppImage abaixo cobre isso de novo,
+# redundante de propósito, caso o build seja gerado em outro lugar).
+# O binário Node copiado (binaries/) é grande demais e específico da máquina,
+# nunca deve ser versionado.
+/src-tauri/target/
+/src-tauri/gen/
+*.AppImage
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
