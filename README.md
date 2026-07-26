@@ -46,7 +46,7 @@ Testado num ambiente Arch/Manjaro Linux — os nomes de pacote abaixo são os do
 ```bash
 # 1. Clonar o repositório
 git clone https://github.com/FelipeHohlenwerger/meu-app-estudos.git
-cd meu-app-estudos/frontend
+cd meu-app-estudos
 
 # 2. Instalar as dependências
 npm install
@@ -76,7 +76,7 @@ npm run lint    # eslint
 
 ## Instalação e execução (modo desktop / Tauri)
 
-Com os pré-requisitos do Tauri (seção acima) instalados, a partir de `frontend/`:
+Com os pré-requisitos do Tauri (seção acima) instalados, a partir da raiz do repositório:
 
 ### Modo desenvolvimento (janela nativa, sem gerar AppImage)
 
@@ -114,7 +114,6 @@ Sem essa chave, o resto do app funciona normalmente — só as funcionalidades d
 ## Estrutura do projeto
 
 ```
-frontend/
 ├── src/
 │   ├── app/
 │   │   ├── api/          # rotas da API (notas, vaults, tags, anexos, IA, importação, grafo...)
@@ -131,4 +130,4 @@ frontend/
 
 ## Licença
 
-Distribuído sob a licença MIT — ver [`LICENSE`](../LICENSE).
+Distribuído sob a licença MIT — ver [`LICENSE`](LICENSE).
