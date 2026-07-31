@@ -14,9 +14,12 @@ import { GRAPH_SPACE_BACKGROUND } from "@/lib/colors";
 import { STATUS_LABELS } from "@/lib/noteStatus";
 import NotePanel, { type NotePanelHandle } from "@/components/NotePanel";
 import VaultSwitcher from "@/components/VaultSwitcher";
+import CreateVaultModal from "@/components/CreateVaultModal";
 import { VaultContext, appendVaultParam, type VaultEntry } from "@/lib/vaultContext";
 import { setActiveVaultId as setLivePreviewVaultId } from "@/lib/livePreview";
 import { DEFAULT_NOTE_FONT, type NoteFontId } from "@/lib/fonts";
+import { isTauri } from "@/lib/platform";
+import { useIsMobile } from "@/lib/useIsMobile";
 
 function stripMdExtension(filename: string): string {
   return filename.replace(/\.(md|pdf|epub)$/i, "");
@@ -100,6 +103,12 @@ export default function Home() {
   // (ainda carregando a lista) até o efeito abaixo resolver qual vault abrir.
   const [vaults, setVaults] = useState<VaultEntry[]>([]);
   const [activeVaultId, setActiveVaultId] = useState<string | null>(null);
+  // Distingue "ainda buscando /api/vaults" de "buscou e o registro está
+  // vazio" — as duas situações deixam activeVaultId null, mas só a primeira
+  // deve mostrar "Carregando..."; a segunda mostra a tela de boas-vindas.
+  const [vaultsLoaded, setVaultsLoaded] = useState(false);
+  const [showFirstVaultModal, setShowFirstVaultModal] = useState(false);
+  const [creatingFirstVault, setCreatingFirstVault] = useState(false);
   // Espelha activeVaultId pra checar, dentro de callbacks de fetch já em voo,
   // se a resposta ainda é do vault ativo — sem isso, trocar de vault rápido
   // (ex: logo depois de criar um vault novo) corre risco de uma resposta
@@ -129,6 +138,11 @@ export default function Home() {
   // Recolher/expandir a sidebar de notas — não precisa persistir entre
   // sessões, sempre volta expandida ao reabrir o app.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Abaixo do breakpoint (ver useIsMobile.ts), a UI simplifica: split-screen
+  // some, e a sidebar vira um drawer por cima da tela em vez de dividir o
+  // espaço horizontal — ver mobileSidebarOpen logo abaixo.
+  const isMobile = useIsMobile();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
@@ -451,6 +465,91 @@ export default function Home() {
     }
   }
 
+  // Remove um vault do registro + apaga seu índice SQLite (ver DELETE
+  // /api/vaults) — nunca toca na pasta de notas original no disco. Se o vault
+  // removido era o ativo, troca pro primeiro restante ou, se não sobrar
+  // nenhum, volta pra tela de boas-vindas (activeVaultId null com
+  // vaultsLoaded true).
+  async function removeVaultEntry(id: string) {
+    const res = await fetch("/api/vaults", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      window.alert(data.error ?? "Não foi possível remover o vault");
+      return;
+    }
+    const remaining = vaults.filter((v) => v.id !== id);
+    setVaults(remaining);
+    if (id === activeVaultId) {
+      if (remaining.length > 0) {
+        switchVault(remaining[0].id);
+      } else {
+        setActiveVaultId(null);
+        localStorage.removeItem("activeVaultId");
+      }
+    }
+  }
+
+  // Criação do primeiro vault, a partir da tela de boas-vindas (registro
+  // vazio) — mesmo fluxo de VaultSwitcher.handleCreateSubmit/handlePickFolder,
+  // duplicado aqui porque essa tela é renderizada antes do
+  // VaultContext.Provider/header onde o VaultSwitcher normalmente vive.
+  async function handleCreateFirstVault(name: string) {
+    setCreatingFirstVault(true);
+    try {
+      const res = await fetch("/api/vaults", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!data.vault) {
+        window.alert(data.error ?? "Não foi possível criar o vault");
+        return;
+      }
+      setVaults([data.vault]);
+      switchVault(data.vault.id);
+      setShowFirstVaultModal(false);
+    } finally {
+      setCreatingFirstVault(false);
+    }
+  }
+
+  async function finishPickFolderFirstVault(selected: string) {
+    setCreatingFirstVault(true);
+    try {
+      const res = await fetch("/api/vaults", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: selected }),
+      });
+      const data = await res.json();
+      if (!data.vault) {
+        window.alert(data.error ?? "Não foi possível adicionar o vault");
+        return;
+      }
+      setVaults([data.vault]);
+      switchVault(data.vault.id);
+      setShowFirstVaultModal(false);
+    } finally {
+      setCreatingFirstVault(false);
+    }
+  }
+
+  async function handlePickFolderFirstVault() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const selected = await invoke<string | null>("pick_folder");
+      if (typeof selected !== "string") return; // cancelado
+      await finishPickFolderFirstVault(selected);
+    } catch (err) {
+      window.alert("Não foi possível abrir o seletor de pasta: " + String(err));
+    }
+  }
+
   // Carrega a lista de vaults uma única vez ao abrir o app (rota vault-agnóstica,
   // não passa por vaultFetch), e decide qual fica ativo: o último usado
   // (localStorage), se ainda existir na lista, ou o primeiro vault conhecido
@@ -461,6 +560,7 @@ export default function Home() {
       .then((data) => {
         const list: VaultEntry[] = data.vaults ?? [];
         setVaults(list);
+        setVaultsLoaded(true);
         if (list.length === 0) return;
         const stored = localStorage.getItem("activeVaultId");
         const initial = stored && list.some((v) => v.id === stored) ? stored : list[0].id;
@@ -549,6 +649,16 @@ export default function Home() {
     setPanelB(null);
     setFocusedPanel("a");
   }
+
+  // Split-screen fica indisponível no mobile (ver header, botão "Dividir
+  // tela" oculto). Cobre o caso de já estar dividido ao encolher a janela
+  // (ou girar um tablet) abaixo do breakpoint — reaproveita a mesma
+  // closePanelB() do botão × do painel B.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sincroniza splitMode com a largura da tela, não há "sistema externo" pra assinar aqui (matchMedia em si já é assinado por useIsMobile)
+    if (isMobile && splitMode) closePanelB();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile]);
 
   function closePanelA() {
     // Promove o painel B pra posição de A antes de sair da divisão.
@@ -676,6 +786,7 @@ export default function Home() {
       return;
     }
     lastNoteClickRef.current = { filename, time: now };
+    if (isMobile) setMobileSidebarOpen(false);
     openNoteInPanel(filename);
   }
 
@@ -921,13 +1032,59 @@ export default function Home() {
     </>
   );
 
-  // Ainda buscando /api/vaults (ou nenhum vault existe, caso impossível na
-  // prática — createVault sempre garante ao menos o bootstrap "Principal") —
-  // evita renderizar o app inteiro tentando disparar vaultFetch sem vault.
-  if (!activeVaultId) {
+  // Ainda buscando /api/vaults — evita renderizar o app inteiro tentando
+  // disparar vaultFetch sem vault.
+  if (!vaultsLoaded) {
     return (
       <main style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", color: "var(--text-muted)" }}>
         Carregando...
+      </main>
+    );
+  }
+
+  // Registro carregado e vazio — instalação nova, ou último vault acabou de
+  // ser removido (ver removeVaultEntry). Guia a criação do primeiro vault em
+  // vez de cair num "Carregando..." que nunca resolveria sozinho.
+  if (!activeVaultId) {
+    return (
+      <main
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "100vh",
+          textAlign: "center",
+          gap: "0.5rem",
+        }}
+      >
+        <h1 style={{ fontSize: "2em", margin: 0 }}>Bem-vindo</h1>
+        <p style={{ color: "var(--text-muted)", margin: "0 0 1.5rem 0", maxWidth: "320px", padding: "0 1rem" }}>
+          Nenhum vault encontrado. Crie um vault para começar a guardar suas notas.
+        </p>
+        <button
+          onClick={() => setShowFirstVaultModal(true)}
+          style={{
+            padding: "0.6rem 1.2rem",
+            border: "none",
+            borderRadius: "6px",
+            background: "#2f7fd6",
+            color: "white",
+            cursor: "pointer",
+            fontSize: "0.95rem",
+          }}
+        >
+          + Criar vault
+        </button>
+        {showFirstVaultModal && (
+          <CreateVaultModal
+            submitting={creatingFirstVault}
+            onSubmit={handleCreateFirstVault}
+            onCancel={() => setShowFirstVaultModal(false)}
+            onPickFolder={handlePickFolderFirstVault}
+            allowFolderPicker={isTauri()}
+          />
+        )}
       </main>
     );
   }
@@ -994,17 +1151,18 @@ export default function Home() {
             setVaults((prev) => [...prev, vault]);
             switchVault(vault.id);
           }}
+          onDelete={removeVaultEntry}
         />
 
         {homeView.kind === "editor" && (
           <>
             <button
-              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              onClick={() => (isMobile ? setMobileSidebarOpen((prev) => !prev) : setSidebarCollapsed((prev) => !prev))}
               className="toolbar-link"
-              title={sidebarCollapsed ? "Expandir sidebar" : "Recolher sidebar"}
+              title={isMobile ? "Menu" : sidebarCollapsed ? "Expandir sidebar" : "Recolher sidebar"}
               style={{
                 padding: "0.4rem 0.6rem",
-                background: sidebarCollapsed ? "var(--panel-hover)" : undefined,
+                background: (isMobile ? mobileSidebarOpen : sidebarCollapsed) ? "var(--panel-hover)" : undefined,
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
@@ -1014,19 +1172,23 @@ export default function Home() {
             >
               <SidebarToggleIcon />
             </button>
-            <button
-              onClick={handleToggleSplit}
-              className="toolbar-link"
-              style={{
-                padding: "0.4rem 0.8rem",
-                background: splitMode ? "var(--panel-hover)" : undefined,
-                border: "none",
-                borderRadius: "4px",
-                cursor: "pointer",
-              }}
-            >
-              Dividir tela
-            </button>
+            {/* Split-screen fica indisponível no mobile — sempre uma nota em
+                tela cheia (ver useEffect que força closePanelB() acima). */}
+            {!isMobile && (
+              <button
+                onClick={handleToggleSplit}
+                className="toolbar-link"
+                style={{
+                  padding: "0.4rem 0.8rem",
+                  background: splitMode ? "var(--panel-hover)" : undefined,
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                }}
+              >
+                Dividir tela
+              </button>
+            )}
           </>
         )}
 
@@ -1155,35 +1317,82 @@ export default function Home() {
       {homeView.kind === "editor" && (
       <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
 
+      {/* Backdrop do drawer da sidebar no mobile — clicar fora fecha, igual ao
+          "×" dentro dela. Não existe no desktop (isMobile sempre false lá). */}
+      {isMobile && mobileSidebarOpen && (
+        <div
+          onClick={() => setMobileSidebarOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1499 }}
+        />
+      )}
+
       <aside
-        style={{
-          width: sidebarCollapsed ? "0px" : "240px",
-          flexShrink: 0,
-          borderRight: sidebarCollapsed ? "none" : "1px solid var(--panel-border)",
-          padding: sidebarCollapsed ? "0" : "1rem",
-          overflow: "hidden",
-          overflowY: sidebarCollapsed ? "hidden" : "auto",
-          transition: "width 0.18s ease, padding 0.18s ease",
-        }}
+        style={
+          isMobile
+            ? {
+                position: "fixed",
+                top: 0,
+                left: mobileSidebarOpen ? 0 : "-280px",
+                width: "280px",
+                height: "100%",
+                zIndex: 1500,
+                background: "var(--background)",
+                borderRight: "1px solid var(--panel-border)",
+                padding: "1rem",
+                overflow: "hidden",
+                overflowY: "auto",
+                transition: "left 0.2s ease",
+                boxShadow: mobileSidebarOpen ? "2px 0 12px rgba(0,0,0,0.3)" : "none",
+              }
+            : {
+                width: sidebarCollapsed ? "0px" : "240px",
+                flexShrink: 0,
+                borderRight: sidebarCollapsed ? "none" : "1px solid var(--panel-border)",
+                padding: sidebarCollapsed ? "0" : "1rem",
+                overflow: "hidden",
+                overflowY: sidebarCollapsed ? "hidden" : "auto",
+                transition: "width 0.18s ease, padding 0.18s ease",
+              }
+        }
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
           <h2 style={{ fontSize: "1.1rem" }}>Notas</h2>
-          <button
-            onClick={(e) => openNewNoteMenu(e.currentTarget.getBoundingClientRect())}
-            className="toolbar-link"
-            title="Nova nota"
-            style={{
-              padding: "0.3rem",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-              color: "var(--text-muted)",
-              display: "flex",
-              alignItems: "center",
-            }}
-          >
-            <PlusIcon />
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.2rem" }}>
+            <button
+              onClick={(e) => openNewNoteMenu(e.currentTarget.getBoundingClientRect())}
+              className="toolbar-link"
+              title="Nova nota"
+              style={{
+                padding: "0.3rem",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                color: "var(--text-muted)",
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <PlusIcon />
+            </button>
+            {isMobile && (
+              <button
+                onClick={() => setMobileSidebarOpen(false)}
+                className="toolbar-link"
+                title="Fechar"
+                style={{
+                  padding: "0.3rem 0.5rem",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  color: "var(--text-muted)",
+                  fontSize: "1.1rem",
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
         </div>
 
         <div style={{ position: "relative", marginBottom: "1rem" }}>
@@ -1347,6 +1556,7 @@ export default function Home() {
           ref={panelARef}
           filename={panelA}
           theme={theme}
+          isMobile={isMobile}
           fontSize={fontSizeFor(panelA)}
           isFontSizeOverridden={!!panelA && panelA in noteFontSizes}
           noteFont={noteFontFor(panelA)}
@@ -1373,6 +1583,7 @@ export default function Home() {
               ref={panelBRef}
               filename={panelB}
               theme={theme}
+              isMobile={false}
               fontSize={fontSizeFor(panelB)}
               isFontSizeOverridden={!!panelB && panelB in noteFontSizes}
               noteFont={noteFontFor(panelB)}

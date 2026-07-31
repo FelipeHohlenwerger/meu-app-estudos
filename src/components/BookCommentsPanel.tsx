@@ -25,6 +25,9 @@ export type AnchoredComment = { id: number; tipo: string; texto: string; comenta
 
 type Props = {
   filename: string;
+  // Abaixo do breakpoint (ver useIsMobile.ts) — troca a coluna lateral
+  // animada por width por uma folha fixa que sobe de baixo pra cima.
+  isMobile?: boolean;
   open: boolean;
   onClose: () => void;
   // Só passado por notas .md — PDF/EPUB não tem texto pra ancorar comentário.
@@ -82,6 +85,7 @@ type MergedItem =
 // reflete a ordem real de criação mesmo misturando os dois tipos).
 export default function BookCommentsPanel({
   filename,
+  isMobile,
   open,
   onClose,
   anchoredComments,
@@ -157,17 +161,45 @@ export default function BookCommentsPanel({
   ].sort((a, b) => a.id - b.id);
 
   return (
-    <aside
-      style={{
-        width: open ? "280px" : "0px",
-        borderLeft: open ? "1px solid var(--panel-border)" : "none",
-        padding: open ? "1rem" : "0",
-        overflow: "hidden",
-        overflowY: open ? "auto" : "hidden",
-        flexShrink: 0,
-        transition: "width 0.22s ease, padding 0.22s ease",
-      }}
-    >
+    <>
+      {/* Backdrop só no mobile — no desktop a coluna lateral não cobre o
+          editor, então não faz sentido escurecer o resto da tela. */}
+      {isMobile && open && (
+        <div
+          onClick={onClose}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1499 }}
+        />
+      )}
+      <aside
+        style={
+          isMobile
+            ? {
+                position: "fixed",
+                left: 0,
+                right: 0,
+                bottom: open ? 0 : "-100%",
+                maxHeight: "70vh",
+                background: "var(--panel-bg)",
+                borderTop: "1px solid var(--panel-border)",
+                borderTopLeftRadius: "12px",
+                borderTopRightRadius: "12px",
+                padding: "1rem",
+                overflow: "hidden",
+                overflowY: "auto",
+                zIndex: 1500,
+                transition: "bottom 0.22s ease",
+              }
+            : {
+                width: open ? "280px" : "0px",
+                borderLeft: open ? "1px solid var(--panel-border)" : "none",
+                padding: open ? "1rem" : "0",
+                overflow: "hidden",
+                overflowY: open ? "auto" : "hidden",
+                flexShrink: 0,
+                transition: "width 0.22s ease, padding 0.22s ease",
+              }
+        }
+      >
       {open && (
         <>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
@@ -295,6 +327,7 @@ export default function BookCommentsPanel({
       {pendingTipo && (
         <CommentModal tipo={pendingTipo} onConfirm={handleConfirmComment} onCancel={() => setPendingTipo(null)} />
       )}
-    </aside>
+      </aside>
+    </>
   );
 }

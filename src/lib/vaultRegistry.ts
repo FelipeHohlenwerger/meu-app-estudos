@@ -2,12 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { sanitizeFilename, findAvailableFilename } from "@/lib/slugify";
 
-// Raiz onde vaults NOVOS são criados automaticamente (nesta fase web, sem
-// seletor de pasta nativo — ver nota no topo do arquivo sobre a fase desktop
-// futura). O vault pré-existente do projeto (~/projetos/vault-notas) continua
-// no lugar de sempre — só é registrado aqui, nunca movido.
+// Raiz onde vaults NOVOS são criados no modo web (sem seletor de pasta nativo
+// — no modo desktop/Tauri, `createVault` recebe um `customPath` já existente
+// escolhido pelo usuário e nunca usa essa raiz).
 const VAULTS_ROOT = path.join(process.env.HOME || "", "vaults");
-const LEGACY_VAULT_PATH = path.join(process.env.HOME || "", "projetos", "vault-notas");
 const REGISTRY_DIR = path.join(process.env.HOME || "", ".study-app");
 const REGISTRY_PATH = path.join(REGISTRY_DIR, "vaults.json");
 
@@ -34,13 +32,11 @@ function persist(registry: Registry): void {
   cached = registry;
 }
 
-// Primeira leitura depois dessa mudança: o registro ainda não existe — cria
-// sozinho um único vault apontando pro que já era a vault fixa do app até
-// agora, sem mover/tocar nenhuma nota. Migração transparente.
-function bootstrap(): Registry {
-  const registry: Registry = {
-    vaults: [{ id: "principal", name: "Principal", path: LEGACY_VAULT_PATH, createdAt: new Date().toISOString() }],
-  };
+// Primeira leitura: o arquivo de registro ainda não existe — cria vazio.
+// Nenhum vault é registrado automaticamente; a tela de "nenhum vault" (ver
+// page.tsx) é quem guia a criação do primeiro vault.
+function createEmptyRegistry(): Registry {
+  const registry: Registry = { vaults: [] };
   persist(registry);
   return registry;
 }
@@ -48,7 +44,7 @@ function bootstrap(): Registry {
 function loadRegistry(): Registry {
   if (cached) return cached;
   if (!existsSync(REGISTRY_PATH)) {
-    cached = bootstrap();
+    cached = createEmptyRegistry();
     return cached;
   }
   cached = JSON.parse(readFileSync(REGISTRY_PATH, "utf-8")) as Registry;
@@ -120,4 +116,14 @@ export function renameVault(id: string, newName: string): VaultEntry {
   entry.name = trimmed;
   persist(registry);
   return entry;
+}
+
+// Remove só o registro (nunca a pasta de notas no disco) — idempotente de
+// propósito: remover um id que já não está no registro não é erro, é o
+// resultado final que a chamada queria de qualquer forma. Quem chama (ver
+// DELETE /api/vaults) também apaga o índice SQLite do vault antes disso.
+export function removeVault(id: string): void {
+  const registry = loadRegistry();
+  registry.vaults = registry.vaults.filter((v) => v.id !== id);
+  persist(registry);
 }

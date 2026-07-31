@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { VaultEntry } from "@/lib/vaultContext";
 import CreateVaultModal from "@/components/CreateVaultModal";
+import ConfirmModal from "@/components/ConfirmModal";
 import { isTauri } from "@/lib/platform";
 
 type Props = {
@@ -11,6 +12,7 @@ type Props = {
   onSwitch: (id: string) => void;
   onRename: (id: string, name: string) => Promise<void>;
   onCreated: (vault: VaultEntry) => void;
+  onDelete: (id: string) => Promise<void>;
 };
 
 function ChevronIcon() {
@@ -29,12 +31,21 @@ function PencilIcon() {
   );
 }
 
-export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRename, onCreated }: Props) {
+function TrashIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z" />
+    </svg>
+  );
+}
+
+export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRename, onCreated, onDelete }: Props) {
   const [open, setOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -79,6 +90,15 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
     const current = vaults.find((v) => v.id === id);
     if (!trimmed || (current && trimmed === current.name)) return;
     await onRename(id, trimmed);
+  }
+
+  async function handleConfirmDelete() {
+    if (!confirmDeleteId) return;
+    const id = confirmDeleteId;
+    setConfirmDeleteId(null);
+    if (renamingId === id) setRenamingId(null);
+    await onDelete(id);
+    setOpen(false);
   }
 
   async function handleCreateSubmit(name: string) {
@@ -249,6 +269,25 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
                   <PencilIcon />
                 </button>
               )}
+              {renamingId !== vault.id && (
+                <button
+                  onClick={() => setConfirmDeleteId(vault.id)}
+                  title="Remover vault da lista"
+                  className="toolbar-link"
+                  style={{
+                    padding: "0.35rem",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    color: "var(--text-muted)",
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                >
+                  <TrashIcon />
+                </button>
+              )}
             </div>
           ))}
 
@@ -280,6 +319,17 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
           onCancel={() => setShowCreateModal(false)}
           onPickFolder={handlePickFolder}
           allowFolderPicker={isTauri()}
+        />
+      )}
+
+      {confirmDeleteId && (
+        <ConfirmModal
+          title="Remover vault"
+          message={`Remover "${vaults.find((v) => v.id === confirmDeleteId)?.name ?? confirmDeleteId}" da lista? A pasta de notas original não é apagada — você pode registrá-la de novo depois, se quiser.`}
+          confirmLabel="Remover"
+          danger
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setConfirmDeleteId(null)}
         />
       )}
     </div>

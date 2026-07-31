@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type CSSProperties } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
@@ -175,6 +175,10 @@ export type NotePanelHandle = {
 type NotePanelProps = {
   filename: string | null;
   theme: "dark" | "light";
+  // Abaixo do breakpoint (ver useIsMobile.ts em page.tsx) — controla o menu
+  // "⋯" que recolhe os controles secundários e o modo bottom-sheet do painel
+  // de comentários unificado (ver BookCommentsPanel).
+  isMobile: boolean;
   fontSize: number;
   isFontSizeOverridden: boolean;
   noteFont: NoteFontId;
@@ -195,6 +199,20 @@ type NotePanelProps = {
   onCreateNoteFromLink: (title: string) => Promise<string | null>;
 };
 
+// Botões da folha "Mais opções" do mobile (ver mobileToolsOpen) — mesmo
+// estilo pra todos, empilhados e alinhados à esquerda (diferente da linha
+// horizontal do desktop, ver o bloco logo acima na árvore de JSX).
+const mobileToolSheetButtonStyle: CSSProperties = {
+  textAlign: "left",
+  background: "transparent",
+  border: "none",
+  borderRadius: "4px",
+  color: "var(--foreground)",
+  cursor: "pointer",
+  padding: "0.6rem 0.4rem",
+  fontSize: "0.9rem",
+};
+
 // Tudo que é "a nota atualmente aberta neste painel": título/tags/toolbar,
 // troca CodeMirror ↔ PdfNativeViewer ↔ EpubViewer, backlinks/menções, coluna de
 // bolhas de comentário, painel lateral de comentários (ancorado ou geral do
@@ -206,6 +224,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   {
     filename,
     theme,
+    isMobile,
     fontSize,
     isFontSizeOverridden,
     noteFont,
@@ -247,6 +266,10 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   // Painel único de comentários (ancorados + gerais) — ver BookCommentsPanel.
   const [showBookComments, setShowBookComments] = useState(false);
   const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
+  // Menu "⋯" no mobile: agrupa os controles secundários (inserir imagem, Aa,
+  // comentários, chat, exportar destaques, controles de imagem) que no
+  // desktop ficam sempre visíveis na linha abaixo do título.
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   // Painel de chat com IA — mutuamente exclusivo com o de comentários (nunca
   // os dois abertos ao mesmo tempo, decisão confirmada com o usuário).
   const [showChat, setShowChat] = useState(false);
@@ -1468,7 +1491,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                     marginBottom: "0.75rem",
                   }}
                 >
-                  {!viewerKind && (
+                  {!isMobile && !viewerKind && (
                     <>
                       <button
                         className="toolbar-link"
@@ -1507,24 +1530,26 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       </button>
                     </>
                   )}
-                  <button
-                    onClick={toggleBookComments}
-                    className="toolbar-link"
-                    style={{
-                      background: showBookComments ? "var(--panel-hover)" : "transparent",
-                      border: "1px solid var(--panel-border)",
-                      borderRadius: "4px",
-                      color: "var(--text-muted)",
-                      cursor: "pointer",
-                      padding: "0.3rem 0.6rem",
-                      fontSize: "0.85rem",
-                      flexShrink: 0,
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    Comentários
-                  </button>
-                  {viewerKind !== "pdf" && (
+                  {!isMobile && (
+                    <button
+                      onClick={toggleBookComments}
+                      className="toolbar-link"
+                      style={{
+                        background: showBookComments ? "var(--panel-hover)" : "transparent",
+                        border: "1px solid var(--panel-border)",
+                        borderRadius: "4px",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        padding: "0.3rem 0.6rem",
+                        fontSize: "0.85rem",
+                        flexShrink: 0,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Comentários
+                    </button>
+                  )}
+                  {!isMobile && viewerKind !== "pdf" && (
                     <button
                       onClick={toggleChat}
                       className="toolbar-link"
@@ -1543,7 +1568,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       Chat
                     </button>
                   )}
-                  {!viewerKind && (
+                  {!isMobile && !viewerKind && (
                     <button
                       className="toolbar-link"
                       title={highlightEntries.length === 0 ? "Nenhum destaque nesta nota" : "Exportar destaques em PDF"}
@@ -1562,6 +1587,26 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       }}
                     >
                       Exportar destaques
+                    </button>
+                  )}
+                  {isMobile && (
+                    <button
+                      onClick={() => setMobileToolsOpen(true)}
+                      className="toolbar-link"
+                      title="Mais opções"
+                      style={{
+                        background: "transparent",
+                        border: "1px solid var(--panel-border)",
+                        borderRadius: "4px",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        padding: "0.3rem 0.7rem",
+                        fontSize: "1rem",
+                        flexShrink: 0,
+                        lineHeight: 1,
+                      }}
+                    >
+                      ⋯
                     </button>
                   )}
                   <StatusDropdown status={studyStatus} contentType={contentType} onChange={handleStatusChange} />
@@ -1585,7 +1630,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
               </>
             )}
 
-            {filename && !viewerKind && selectedImage && (
+            {!isMobile && filename && !viewerKind && selectedImage && (
               <ImageControlPanel
                 image={{
                   size: selectedImage.size,
@@ -1873,6 +1918,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       {filename && (
         <BookCommentsPanel
           filename={filename}
+          isMobile={isMobile}
           open={showBookComments}
           onClose={() => setShowBookComments(false)}
           anchoredComments={!viewerKind ? anchoredComments : undefined}
@@ -1882,6 +1928,157 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onDeleteAnchored={handleDeleteAnchoredById}
           scrollToId={scrollToCommentId}
         />
+      )}
+
+      {/* Botão flutuante pra abrir o painel de comentários no mobile — no
+          desktop esse gatilho já existe na linha de botões (ver acima); no
+          mobile esses botões viraram o menu "⋯", então isso cobre o caso de
+          querer abrir comentários sem ter clicado num marcador no texto. */}
+      {isMobile && filename && !showBookComments && (
+        <button
+          onClick={toggleBookComments}
+          title="Comentários"
+          style={{
+            position: "fixed",
+            right: "1.25rem",
+            bottom: "1.25rem",
+            width: "48px",
+            height: "48px",
+            borderRadius: "50%",
+            border: "1px solid var(--panel-border)",
+            background: "var(--panel-bg)",
+            color: "var(--foreground)",
+            boxShadow: "0 2px 10px rgba(0,0,0,0.3)",
+            cursor: "pointer",
+            fontSize: "1.3rem",
+            zIndex: 1400,
+          }}
+        >
+          💬
+        </button>
+      )}
+
+      {/* Menu "⋯" no mobile: os controles secundários que no desktop ficam
+          sempre visíveis na linha abaixo do título (ver mais acima), mais o
+          ImageControlPanel contextual — tudo dentro de uma folha só, aberta
+          de baixo pra cima. */}
+      {isMobile && mobileToolsOpen && (
+        <>
+          <div
+            onClick={() => setMobileToolsOpen(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1500 }}
+          />
+          <div
+            style={{
+              position: "fixed",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              maxHeight: "70vh",
+              overflowY: "auto",
+              background: "var(--panel-bg)",
+              borderTop: "1px solid var(--panel-border)",
+              borderTopLeftRadius: "12px",
+              borderTopRightRadius: "12px",
+              padding: "1rem",
+              zIndex: 1501,
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.4rem",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.4rem" }}>
+              <h3 style={{ fontSize: "1rem", margin: 0, color: "var(--foreground)" }}>Mais opções</h3>
+              <button
+                onClick={() => setMobileToolsOpen(false)}
+                title="Fechar"
+                style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "1.2rem", color: "var(--text-muted)" }}
+              >
+                ×
+              </button>
+            </div>
+
+            {!viewerKind && (
+              <button
+                className="toolbar-link"
+                onClick={() => {
+                  setMobileToolsOpen(false);
+                  handleInsertImageClick();
+                }}
+                style={mobileToolSheetButtonStyle}
+              >
+                Inserir imagem
+              </button>
+            )}
+            {!viewerKind && (
+              <button
+                className="toolbar-link"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setMobileToolsOpen(false);
+                  openFontSizePopup(rect);
+                }}
+                style={mobileToolSheetButtonStyle}
+              >
+                Fonte e tamanho do texto
+              </button>
+            )}
+            <button
+              className="toolbar-link"
+              onClick={() => {
+                setMobileToolsOpen(false);
+                toggleBookComments();
+              }}
+              style={mobileToolSheetButtonStyle}
+            >
+              Comentários
+            </button>
+            {viewerKind !== "pdf" && (
+              <button
+                className="toolbar-link"
+                onClick={() => {
+                  setMobileToolsOpen(false);
+                  toggleChat();
+                }}
+                style={mobileToolSheetButtonStyle}
+              >
+                Chat
+              </button>
+            )}
+            {!viewerKind && (
+              <button
+                className="toolbar-link"
+                disabled={highlightEntries.length === 0}
+                onClick={() => {
+                  setMobileToolsOpen(false);
+                  handleExportHighlights();
+                }}
+                style={{
+                  ...mobileToolSheetButtonStyle,
+                  color: highlightEntries.length === 0 ? "var(--panel-border)" : "var(--foreground)",
+                  cursor: highlightEntries.length === 0 ? "default" : "pointer",
+                }}
+              >
+                Exportar destaques
+              </button>
+            )}
+
+            {!viewerKind && selectedImage && (
+              <div style={{ borderTop: "1px solid var(--panel-border)", marginTop: "0.4rem", paddingTop: "0.75rem" }}>
+                <ImageControlPanel
+                  image={{
+                    size: selectedImage.size,
+                    shape: selectedImage.shape,
+                    align: selectedImage.align,
+                    onSizeChange: handleImageSizeChange,
+                    onShapeChange: handleImageShapeChange,
+                    onAlignChange: handleImageAlignChange,
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       {filename && (

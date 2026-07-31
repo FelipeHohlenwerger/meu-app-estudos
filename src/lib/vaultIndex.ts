@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "fs";
 import path from "path";
 import { extractLinkTargets, findBlockMarkers } from "@/lib/wikiLinkSyntax";
 import { getVaultById } from "@/lib/vaultRegistry";
@@ -182,21 +182,23 @@ function migrate(conn: DatabaseSync): void {
   conn.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+// Pasta do índice de UM vault. Fixo em ~/.study-app/index/ (mesma raiz do
+// registro de vaults, vaultRegistry.ts) — de propósito NÃO relativo a
+// process.cwd(): tags e status vivem só aqui (não são deriváveis do conteúdo
+// do arquivo desde a v7/v11 do schema), então se esse caminho mudasse
+// conforme o servidor é executado (modo web a partir da raiz do repo,
+// sidecar desktop rodando de uma cópia em ~/.local/share/.../standalone) cada
+// modo divergiria silenciosamente nas tags/status da MESMA vault. Fixando
+// aqui, os dois modos sempre enxergam o mesmo índice.
+function indexDirFor(vaultId: string): string {
+  return path.join(process.env.HOME || "", ".study-app", "index", vaultId);
+}
+
 function getDb(vaultId: string): DatabaseSync {
   const cached = dbByVault.get(vaultId);
   if (cached) return cached;
 
-  // Índice namespaced por vault: cada vault tem sua própria subpasta, nunca um
-  // arquivo .sqlite compartilhado entre vaults. Fixo em ~/.study-app/index/
-  // (mesma raiz do registro de vaults, vaultRegistry.ts) — de propósito NÃO
-  // relativo a process.cwd(): tags e status vivem só aqui (não são
-  // deriváveis do conteúdo do arquivo desde a v7/v11 do schema), então se
-  // esse caminho mudasse conforme o servidor é executado (modo web a partir
-  // de frontend/, sidecar desktop rodando de uma cópia em
-  // ~/.local/share/.../standalone) cada modo divergiria silenciosamente nas
-  // tags/status da MESMA vault. Fixando aqui, os dois modos sempre
-  // enxergam o mesmo índice.
-  const dbDir = path.join(process.env.HOME || "", ".study-app", "index", vaultId);
+  const dbDir = indexDirFor(vaultId);
   if (!existsSync(dbDir)) {
     mkdirSync(dbDir, { recursive: true });
   }
@@ -435,6 +437,29 @@ export function ensureIndexFresh(vaultId: string, opts: { forceMaxAgeMs?: number
 }
 
 export { reindexNote };
+
+// Fecha a conexão SQLite (se aberta) e apaga a pasta de índice inteira do
+// vault — usado por DELETE /api/vaults ao remover um vault do registro.
+// Nunca toca na pasta de notas original (isso é responsabilidade só de
+// vaultRegistry.removeVault, que nem recebe o path). Fechar a conexão antes
+// de apagar o arquivo evita mexer no .sqlite enquanto o node:sqlite ainda tem
+// um handle aberto pra ele. Também limpa lastScanByVault: se a mesma pasta
+// for registrada de novo depois (possivelmente reaproveitando o mesmo id,
+// caso o nome dado seja idêntico), ensureIndexFresh precisa rodar uma
+// reconciliação completa de novo no índice recriado do zero, não pular por
+// achar que já escaneou esse vaultId recentemente.
+export function deleteVaultIndex(vaultId: string): void {
+  const conn = dbByVault.get(vaultId);
+  if (conn) {
+    conn.close();
+    dbByVault.delete(vaultId);
+  }
+  lastScanByVault.delete(vaultId);
+  const dbDir = indexDirFor(vaultId);
+  if (existsSync(dbDir)) {
+    rmSync(dbDir, { recursive: true, force: true });
+  }
+}
 
 export function getTagCounts(vaultId: string): [string, number][] {
   const conn = getDb(vaultId);

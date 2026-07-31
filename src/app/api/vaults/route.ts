@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { listVaults, createVault, renameVault } from "@/lib/vaultRegistry";
+import { listVaults, createVault, renameVault, removeVault } from "@/lib/vaultRegistry";
+import { deleteVaultIndex } from "@/lib/vaultIndex";
 
 // GET: lista todos os vaults conhecidos — única rota "vault-agnóstica" do app
 // (o frontend chama antes mesmo de saber qual vault está ativo).
@@ -52,5 +53,23 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ vault });
   } catch (error) {
     return NextResponse.json({ error: "Não foi possível renomear o vault", details: String(error) }, { status: 500 });
+  }
+}
+
+// DELETE { id }: remove só o registro + o índice SQLite do vault (ver
+// deleteVaultIndex/removeVault). Nunca apaga a pasta de notas original — se a
+// mesma pasta for registrada de novo depois, o índice é reconstruído do zero
+// a partir dos arquivos.
+export async function DELETE(request: NextRequest) {
+  try {
+    const { id } = await request.json();
+    if (!id || typeof id !== "string") {
+      return NextResponse.json({ error: "Campo 'id' é obrigatório" }, { status: 400 });
+    }
+    deleteVaultIndex(id);
+    removeVault(id);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json({ error: "Não foi possível remover o vault", details: String(error) }, { status: 500 });
   }
 }
