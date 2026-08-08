@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import GraphView, { type GraphNode, type GraphEdge } from "@/components/GraphView";
 import LibraryHome from "@/components/LibraryHome";
 import TagNoteList from "@/components/TagNoteList";
-import { type LibraryNote } from "@/components/NoteCard";
+import { StarIcon, type LibraryNote } from "@/components/NoteCard";
+import { buildTagTree, filterTagTree, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
 import NoteRowMenu from "@/components/NoteRowMenu";
 import ConfirmModal from "@/components/ConfirmModal";
@@ -20,6 +21,7 @@ import { setActiveVaultId as setLivePreviewVaultId } from "@/lib/livePreview";
 import { DEFAULT_NOTE_FONT, type NoteFontId } from "@/lib/fonts";
 import { isTauri } from "@/lib/platform";
 import { useIsMobile } from "@/lib/useIsMobile";
+import { formatRelativeTime } from "@/lib/relativeTime";
 
 function stripMdExtension(filename: string): string {
   return filename.replace(/\.(md|pdf|epub)$/i, "");
@@ -96,6 +98,8 @@ type HomeView =
   | { kind: "tagList"; tag: string | null }
   | { kind: "allNotes" }
   | { kind: "statusList"; status: string }
+  | { kind: "recentList" }
+  | { kind: "favoritesList" }
   | { kind: "editor" };
 
 export default function Home() {
@@ -144,6 +148,10 @@ export default function Home() {
   const isMobile = useIsMobile();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
+  // Aba ativa da sidebar (dentro do modo editor) — "Notas" (lista plana, por
+  // título) ou "Tags" (árvore hierárquica, ver src/lib/tagTree.ts). A busca
+  // abaixo é compartilhada pelas duas.
+  const [sidebarTab, setSidebarTab] = useState<"notes" | "tags">("notes");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
   // Chave da ocorrência sendo renomeada na sidebar: "group.key::note.filename",
@@ -315,6 +323,28 @@ export default function Home() {
     });
   }
 
+  // Alterna favorito (estrela no card e no editor) — mesma fonte única
+  // chamada por todo card (Homepage/listas/sidebar) e pelo NotePanel, pra
+  // nunca divergir. Favoritar não conta como "atividade" (ver touchActivity
+  // em vaultIndex.ts), então não afeta "Editados recentemente".
+  function handleFavoriteChanged(filename: string, isFavorite: boolean) {
+    setLibraryNotes((prev) => prev.map((note) => (note.filename === filename ? { ...note, isFavorite } : note)));
+    vaultFetch("/api/note/favorite", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, isFavorite }),
+    });
+  }
+
+  // Wrapper de handleFavoriteChanged pra quem só tem o filename à mão (cards
+  // da Homepage/listas/sidebar) e precisa inverter o valor atual — o
+  // NotePanel já sabe o próximo valor de antemão (seu próprio estado local),
+  // então chama handleFavoriteChanged direto.
+  function toggleFavorite(filename: string) {
+    const note = libraryNotes.find((n) => n.filename === filename);
+    if (note) handleFavoriteChanged(filename, !note.isFavorite);
+  }
+
   function toggleGraphPanel() {
     setShowGraph((prev) => !prev);
   }
@@ -378,36 +408,31 @@ export default function Home() {
     });
   }
 
-  // Agrupa libraryNotes por tag (uma nota com N tags aparece em N grupos — não
-  // existe "tag principal"), filtrando por busca (título ou tag, não corpo do
-  // texto). Grupos em ordem alfabética; "Sem tag" sempre por último.
-  const sidebarGroups = useMemo(() => {
+  // Aba "Notas" da sidebar: lista plana de todas as notas do vault, por
+  // título — sem agrupamento por tag. Filtrada só pelo título (busca de tag
+  // é papel da aba "Tags").
+  const sidebarNotesList = useMemo(() => {
     const q = sidebarSearch.trim().toLowerCase();
-    const matches = libraryNotes.filter((note) => {
-      if (!q) return true;
-      if (note.title.toLowerCase().includes(q)) return true;
-      return note.tags.some((t) => t.toLowerCase().includes(q));
-    });
+    const matches = q ? libraryNotes.filter((note) => note.title.toLowerCase().includes(q)) : libraryNotes;
+    return [...matches].sort((a, b) => a.title.localeCompare(b.title));
+  }, [libraryNotes, sidebarSearch]);
 
-    const byTag = new Map<string, LibraryNote[]>();
-    const untagged: LibraryNote[] = [];
-    for (const note of matches) {
-      if (note.tags.length === 0) {
-        untagged.push(note);
-        continue;
-      }
-      for (const tag of note.tags) {
-        const list = byTag.get(tag) ?? [];
-        list.push(note);
-        byTag.set(tag, list);
-      }
+  // Aba "Tags" da sidebar: árvore hierárquica (ver src/lib/tagTree.ts — tags
+  // com "." viram níveis, ex: "História.Antiga"), filtrada pela mesma busca.
+  // "Sem tag" fica de fora da árvore (não é uma tag de verdade) e é
+  // renderizado como um item plano à parte, sempre por último — mesmo
+  // espírito do grupo "Sem tag" que a sidebar já tinha antes das abas.
+  const sidebarTagTree = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const note of libraryNotes) {
+      for (const tag of note.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
     }
+    return filterTagTree(buildTagTree(Array.from(counts.entries())), sidebarSearch);
+  }, [libraryNotes, sidebarSearch]);
 
-    const tagGroups = Array.from(byTag.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([tag, groupNotes]) => ({ key: tag, label: tag, notes: groupNotes }));
-
-    return [...tagGroups, { key: UNTAGGED_GROUP_KEY, label: "Sem tag", notes: untagged }];
+  const sidebarUntaggedNotes = useMemo(() => {
+    const q = sidebarSearch.trim().toLowerCase();
+    return libraryNotes.filter((note) => note.tags.length === 0 && (!q || note.title.toLowerCase().includes(q)));
   }, [libraryNotes, sidebarSearch]);
 
   function toggleTheme() {
@@ -790,6 +815,167 @@ export default function Home() {
     openNoteInPanel(filename);
   }
 
+  // Uma linha de nota na sidebar (título + "..." → NoteRowMenu, com rename
+  // inline) — reaproveitada pela aba "Notas" (lista plana, com tempo relativo
+  // + estrela de favorito) e pela aba "Tags" (notas reveladas ao expandir um
+  // nó, sem esses dois extras). `rowKey` é só o filename na aba "Notas" (cada
+  // nota aparece uma única vez ali); na aba "Tags" seria `fullPath::filename`
+  // se a MESMA nota pudesse ficar em rename simultâneo em dois nós abertos ao
+  // mesmo tempo — mesmo motivo do `group.key::filename` de antes das abas.
+  function renderSidebarNoteRow(note: LibraryNote, rowKey: string, options: { indent: string; showMeta?: boolean }) {
+    const isOpen = note.filename === panelA || note.filename === panelB;
+    if (renamingKey === rowKey) {
+      return (
+        <input
+          autoFocus
+          value={renameDraft}
+          onChange={(e) => setRenameDraft(e.target.value)}
+          onBlur={() => renameSidebarNote(note.filename, renameDraft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setRenamingKey(null);
+            }
+          }}
+          style={{
+            width: "100%",
+            padding: `0.4rem 0.5rem 0.4rem ${options.indent}`,
+            background: "var(--panel-bg)",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "4px",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            boxSizing: "border-box",
+          }}
+        />
+      );
+    }
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: "2px" }}>
+        <button
+          onClick={() => handleSidebarNoteClick(rowKey, note.filename)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            textAlign: "left",
+            padding: `0.4rem 0.5rem 0.4rem ${options.indent}`,
+            background: isOpen ? "var(--panel-hover)" : "transparent",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            overflow: "hidden",
+          }}
+        >
+          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</div>
+          {options.showMeta && (
+            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{formatRelativeTime(note.lastActivityMs)}</div>
+          )}
+        </button>
+        {options.showMeta && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFavorite(note.filename);
+            }}
+            className="toolbar-link"
+            title={note.isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
+            style={{ flexShrink: 0, padding: "0.4rem 0.2rem", border: "none", borderRadius: "4px", cursor: "pointer", background: "transparent", display: "flex", alignItems: "center" }}
+          >
+            <StarIcon filled={note.isFavorite} />
+          </button>
+        )}
+        <button
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setNoteRowMenu({ x: rect.left, y: rect.bottom + 4, rowKey, filename: note.filename });
+          }}
+          className="toolbar-link"
+          title="Opções"
+          style={{
+            flexShrink: 0,
+            padding: "0.4rem 0.3rem",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            color: "var(--text-muted)",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <MoreIcon />
+        </button>
+      </div>
+    );
+  }
+
+  // Nó recursivo da árvore de tags (aba "Tags") — expandir/recolher revela os
+  // nós-filho E as notas cuja tag bate EXATAMENTE com este nó (nunca com um
+  // descendente — cada nota aparece só dentro do nó mais específico da sua
+  // tag, a folha da hierarquia; o nó pai mostra só o contador agregado
+  // (totalCount) sem listar as notas dos filhos, senão a mesma nota apareceria
+  // duplicada em cada nível da hierarquia até a raiz).
+  function renderTagTreeNode(node: TagTreeNode, depth: number) {
+    const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(node.fullPath);
+    const matchingNotes = isExpanded ? libraryNotes.filter((n) => n.tags.includes(node.fullPath)) : [];
+    return (
+      <div key={node.fullPath} style={{ marginBottom: "0.25rem" }}>
+        <button
+          onClick={() => toggleTagGroup(node.fullPath)}
+          className="toolbar-link"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            width: "100%",
+            padding: `0.4rem 0.3rem 0.4rem ${0.3 + depth * 0.9}rem`,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            borderRadius: "4px",
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span
+              style={{
+                display: "inline-block",
+                transition: "transform 0.15s ease",
+                transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                fontSize: "0.75rem",
+                flexShrink: 0,
+              }}
+            >
+              ›
+            </span>
+            {node.name}
+          </span>
+          <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{node.totalCount}</span>
+        </button>
+
+        {isExpanded && (
+          <>
+            {node.children.map((child) => renderTagTreeNode(child, depth + 1))}
+            {matchingNotes.length > 0 && (
+              <ul style={{ listStyle: "none", padding: 0, margin: "0.15rem 0 0.5rem 0" }}>
+                {matchingNotes.map((note) => (
+                  <li key={note.filename} style={{ marginBottom: "0.3rem" }}>
+                    {renderSidebarNoteRow(note, `${node.fullPath}::${note.filename}`, { indent: `${1.3 + depth * 0.9}rem` })}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
   // Atalho global (não é um keymap do CodeMirror — precisa funcionar em
   // qualquer lugar do app, não só com o editor focado): Alt+N cria nota em
   // branco direto, sem passar pelo menu "+".
@@ -847,7 +1033,7 @@ export default function Home() {
   }
 
   // Ctrl/Alt+N e o item "Nota em branco" do menu "+" caem aqui direto —
-  // mesma rota que handleCreateNoteFromLink, mas com "blank: true" (sem H1 no corpo).
+  // mesma rota que handleCreateNoteFromLink.
   // Guarda contra clique duplo/repetido enquanto a criação ainda está em
   // andamento (sem isso, cliques repetidos — ex: por a requisição demorar e
   // parecer que "nada aconteceu" — disparam uma criação por clique, todas
@@ -860,7 +1046,7 @@ export default function Home() {
       const res = await vaultFetch("/api/note/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Sem título", blank: true }),
+        body: JSON.stringify({ title: "Sem título" }),
       });
       const data = await res.json();
       if (data.filename) {
@@ -1269,6 +1455,9 @@ export default function Home() {
           onViewTag={(tag) => setHomeView({ kind: "tagList", tag })}
           onViewAllNotes={() => setHomeView({ kind: "allNotes" })}
           onViewStatus={(status) => setHomeView({ kind: "statusList", status })}
+          onViewRecent={() => setHomeView({ kind: "recentList" })}
+          onViewFavorites={() => setHomeView({ kind: "favoritesList" })}
+          onToggleFavorite={toggleFavorite}
           onOpenNewNoteMenu={openNewNoteMenu}
           onFileDropped={handleFileSelected}
           onCreateBlank={handleCreateBlank}
@@ -1286,6 +1475,7 @@ export default function Home() {
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
+          onToggleFavorite={toggleFavorite}
         />
       )}
 
@@ -1298,6 +1488,7 @@ export default function Home() {
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
+          onToggleFavorite={toggleFavorite}
         />
       )}
 
@@ -1310,6 +1501,34 @@ export default function Home() {
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
+          onToggleFavorite={toggleFavorite}
+        />
+      )}
+
+      {homeView.kind === "recentList" && (
+        <TagNoteList
+          tag={null}
+          heading="Editados recentemente"
+          notes={[...libraryNotes].sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
+          metaForNote={(note) => formatRelativeTime(note.lastActivityMs)}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onDeleteMultiple={requestDeleteMultiple}
+          onToggleFavorite={toggleFavorite}
+        />
+      )}
+
+      {homeView.kind === "favoritesList" && (
+        <TagNoteList
+          tag={null}
+          heading="Favoritas"
+          notes={[...libraryNotes].filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
+          onOpenNote={openNoteInPanel}
+          onRenameNote={handleRenameFromCard}
+          onDeleteNote={requestDeleteNote}
+          onDeleteMultiple={requestDeleteMultiple}
+          onToggleFavorite={toggleFavorite}
         />
       )}
 
@@ -1356,7 +1575,27 @@ export default function Home() {
         }
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
-          <h2 style={{ fontSize: "1.1rem" }}>Notas</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.15rem" }}>
+            {(["notes", "tags"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setSidebarTab(tab)}
+                className="toolbar-link"
+                style={{
+                  padding: "0.3rem 0.55rem",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "1.1rem",
+                  fontWeight: sidebarTab === tab ? "bold" : "normal",
+                  color: sidebarTab === tab ? "var(--foreground)" : "var(--text-muted)",
+                  background: sidebarTab === tab ? "var(--panel-hover)" : "transparent",
+                }}
+              >
+                {tab === "notes" ? "Notas" : "Tags"}
+              </button>
+            ))}
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.2rem" }}>
             <button
               onClick={(e) => openNewNoteMenu(e.currentTarget.getBoundingClientRect())}
@@ -1412,7 +1651,7 @@ export default function Home() {
           <input
             value={sidebarSearch}
             onChange={(e) => setSidebarSearch(e.target.value)}
-            placeholder="Buscar notas..."
+            placeholder={sidebarTab === "notes" ? "Buscar notas..." : "Buscar tags..."}
             style={{
               width: "100%",
               padding: "0.4rem 0.5rem 0.4rem 1.8rem",
@@ -1426,12 +1665,23 @@ export default function Home() {
           />
         </div>
 
-        {sidebarGroups.map((group) => {
-          const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(group.key);
-          return (
-            <div key={group.key} style={{ marginBottom: "0.25rem" }}>
+        {sidebarTab === "notes" &&
+          sidebarNotesList.map((note) => (
+            <div key={note.filename} style={{ marginBottom: "0.3rem" }}>
+              {renderSidebarNoteRow(note, note.filename, { indent: "0.5rem", showMeta: true })}
+            </div>
+          ))}
+
+        {sidebarTab === "tags" && (
+          <>
+            {sidebarTagTree.map((node) => renderTagTreeNode(node, 0))}
+
+            {/* "Sem tag" — não é um nó da árvore (não é uma tag de verdade),
+                fica de fora de sidebarTagTree e é renderizado à parte, sempre
+                por último, mesmo espírito do grupo "Sem tag" de antes das abas. */}
+            <div style={{ marginBottom: "0.25rem" }}>
               <button
-                onClick={() => toggleTagGroup(group.key)}
+                onClick={() => toggleTagGroup(UNTAGGED_GROUP_KEY)}
                 className="toolbar-link"
                 style={{
                   display: "flex",
@@ -1452,102 +1702,30 @@ export default function Home() {
                     style={{
                       display: "inline-block",
                       transition: "transform 0.15s ease",
-                      transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                      transform:
+                        sidebarSearch.trim() !== "" || expandedTags.has(UNTAGGED_GROUP_KEY) ? "rotate(90deg)" : "rotate(0deg)",
                       fontSize: "0.75rem",
                     }}
                   >
                     ›
                   </span>
-                  {group.label}
+                  Sem tag
                 </span>
-                <span style={{ color: "var(--text-muted)" }}>{group.notes.length}</span>
+                <span style={{ color: "var(--text-muted)" }}>{sidebarUntaggedNotes.length}</span>
               </button>
 
-              {isExpanded && (
+              {(sidebarSearch.trim() !== "" || expandedTags.has(UNTAGGED_GROUP_KEY)) && (
                 <ul style={{ listStyle: "none", padding: 0, margin: "0.15rem 0 0.5rem 0" }}>
-                  {group.notes.map((note) => {
-                    const rowKey = `${group.key}::${note.filename}`;
-                    const isOpen = note.filename === panelA || note.filename === panelB;
-                    return (
+                  {sidebarUntaggedNotes.map((note) => (
                     <li key={note.filename} style={{ marginBottom: "0.3rem" }}>
-                      {renamingKey === rowKey ? (
-                        <input
-                          autoFocus
-                          value={renameDraft}
-                          onChange={(e) => setRenameDraft(e.target.value)}
-                          onBlur={() => renameSidebarNote(note.filename, renameDraft)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              (e.target as HTMLInputElement).blur();
-                            } else if (e.key === "Escape") {
-                              e.preventDefault();
-                              setRenamingKey(null);
-                            }
-                          }}
-                          style={{
-                            width: "100%",
-                            padding: "0.4rem 0.5rem 0.4rem 1.3rem",
-                            background: "var(--panel-bg)",
-                            border: "1px solid var(--panel-border)",
-                            borderRadius: "4px",
-                            color: "var(--foreground)",
-                            fontSize: "0.85rem",
-                            boxSizing: "border-box",
-                          }}
-                        />
-                      ) : (
-                        <div style={{ display: "flex", alignItems: "center", gap: "2px" }}>
-                          <button
-                            onClick={() => handleSidebarNoteClick(rowKey, note.filename)}
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              textAlign: "left",
-                              padding: "0.4rem 0.5rem 0.4rem 1.3rem",
-                              background: isOpen ? "var(--panel-hover)" : "transparent",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              color: "var(--foreground)",
-                              fontSize: "0.85rem",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {note.title}
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              const rect = e.currentTarget.getBoundingClientRect();
-                              setNoteRowMenu({ x: rect.left, y: rect.bottom + 4, rowKey, filename: note.filename });
-                            }}
-                            className="toolbar-link"
-                            title="Opções"
-                            style={{
-                              flexShrink: 0,
-                              padding: "0.4rem 0.3rem",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              color: "var(--text-muted)",
-                              display: "flex",
-                              alignItems: "center",
-                            }}
-                          >
-                            <MoreIcon />
-                          </button>
-                        </div>
-                      )}
+                      {renderSidebarNoteRow(note, `${UNTAGGED_GROUP_KEY}::${note.filename}`, { indent: "1.3rem" })}
                     </li>
-                    );
-                  })}
+                  ))}
                 </ul>
               )}
             </div>
-          );
-        })}
+          </>
+        )}
       </aside>
 
       {/* Área principal: painel(éis) de nota */}
@@ -1570,6 +1748,7 @@ export default function Home() {
           onLibraryChanged={handleLibraryChanged}
           onTagsChanged={handleTagsChanged}
           onStatusChanged={handleStatusChanged}
+          onFavoriteChanged={handleFavoriteChanged}
           onFontSizeChange={handleFontSizeChange}
           onToggleFontSizeOverride={handleToggleFontSizeOverride}
           onNoteFontChange={handleNoteFontChange}
@@ -1597,6 +1776,7 @@ export default function Home() {
               onLibraryChanged={handleLibraryChanged}
               onTagsChanged={handleTagsChanged}
               onStatusChanged={handleStatusChanged}
+              onFavoriteChanged={handleFavoriteChanged}
               onFontSizeChange={handleFontSizeChange}
               onToggleFontSizeOverride={handleToggleFontSizeOverride}
               onNoteFontChange={handleNoteFontChange}

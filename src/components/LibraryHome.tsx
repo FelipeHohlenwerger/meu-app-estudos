@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
 import { STATUS_COLORS } from "@/lib/colors";
 import { STATUS_LABELS, BOOK_STATUS_ORDER, NOTE_STATUS_ORDER } from "@/lib/noteStatus";
+import { formatRelativeTime } from "@/lib/relativeTime";
 
 type Props = {
   notes: LibraryNote[];
@@ -13,6 +14,9 @@ type Props = {
   onViewTag: (tag: string | null) => void;
   onViewAllNotes: () => void;
   onViewStatus: (status: string) => void;
+  onViewRecent: () => void;
+  onViewFavorites: () => void;
+  onToggleFavorite: (filename: string) => void;
   onOpenNewNoteMenu: (rect: DOMRect, direction?: "down-right" | "up-left") => void;
   onFileDropped: (file: File) => void;
   // Mesmas 3 ações do menu "+" — reaproveitadas em destaque no estado vazio
@@ -109,12 +113,14 @@ function SectionGrid({
   onRenameNote,
   onDeleteNote,
   onViewMore,
+  onToggleFavorite,
 }: {
   notes: LibraryNote[];
   onOpenNote: (filename: string) => void;
   onRenameNote: (filename: string) => void;
   onDeleteNote: (filename: string) => void;
   onViewMore: () => void;
+  onToggleFavorite: (filename: string) => void;
 }) {
   const COLUMNS = 4;
   const showMoreCard = notes.length > COLUMNS;
@@ -130,6 +136,8 @@ function SectionGrid({
           onClick={() => onOpenNote(note.filename)}
           onRename={() => onRenameNote(note.filename)}
           onDelete={() => onDeleteNote(note.filename)}
+          isFavorite={note.isFavorite}
+          onToggleFavorite={() => onToggleFavorite(note.filename)}
         />
       ))}
       {showMoreCard && (
@@ -148,6 +156,106 @@ function SectionGrid({
           }}
         >
           + {remaining} outras
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Largura mínima de cada card nas linhas "preenche a largura disponível"
+// (Favoritas, Editados recentemente) — mesma ordem de grandeza dos cards nas
+// seções por tema (essas usam um grid fixo de 4 colunas, sem largura em px
+// declarada em lugar nenhum do projeto; este valor é só uma estimativa
+// razoável validada visualmente).
+const CARD_ROW_MIN_WIDTH = 220;
+const CARD_ROW_GAP = 16; // 1rem
+
+// Linha de cards que preenche a largura disponível (quantos couberem, sem
+// quebrar linha nem rolar) em vez do grid fixo de 4 colunas do SectionGrid —
+// por isso não reaproveita SectionGrid: são dois algoritmos de layout
+// diferentes o bastante pra não valer a pena forçar um componente só a fazer
+// as duas coisas. Mede a própria largura via ResizeObserver (o container da
+// Homepage não tem max-width, então isso genuinamente varia com a janela).
+// Reaproveitada tanto por "Favoritas" quanto por "Editados recentemente" —
+// só muda a lista de notas (já ordenada por quem chama) e o texto de meta
+// (getMeta, opcional — sem ele cada NoteCard mostra o padrão status/tempo de
+// leitura).
+function CardRow({
+  notes,
+  getMeta,
+  onOpenNote,
+  onRenameNote,
+  onDeleteNote,
+  onViewMore,
+  onToggleFavorite,
+}: {
+  notes: LibraryNote[];
+  getMeta?: (note: LibraryNote) => string;
+  onOpenNote: (filename: string) => void;
+  onRenameNote: (filename: string) => void;
+  onDeleteNote: (filename: string) => void;
+  onViewMore: () => void;
+  onToggleFavorite: (filename: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      setContainerWidth(entries[0].contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const perCardWidth = CARD_ROW_MIN_WIDTH + CARD_ROW_GAP;
+  // Antes de medir (primeiro render), assume 4 — mesmo padrão das outras
+  // seções, evita um "pulo" grande assim que o ResizeObserver reporta.
+  const fittable = containerWidth > 0 ? Math.max(1, Math.floor((containerWidth + CARD_ROW_GAP) / perCardWidth)) : 4;
+  const showMoreCard = notes.length > fittable;
+  const visibleNotes = showMoreCard ? notes.slice(0, Math.max(1, fittable - 1)) : notes.slice(0, fittable);
+  const remaining = notes.length - visibleNotes.length;
+  const columnCount = visibleNotes.length + (showMoreCard ? 1 : 0);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${Math.max(columnCount, 1)}, ${CARD_ROW_MIN_WIDTH}px)`,
+        gap: `${CARD_ROW_GAP}px`,
+      }}
+    >
+      {visibleNotes.map((note) => (
+        <NoteCard
+          key={note.filename}
+          note={note}
+          metaOverride={getMeta?.(note)}
+          onClick={() => onOpenNote(note.filename)}
+          onRename={() => onRenameNote(note.filename)}
+          onDelete={() => onDeleteNote(note.filename)}
+          isFavorite={note.isFavorite}
+          onToggleFavorite={() => onToggleFavorite(note.filename)}
+        />
+      ))}
+      {showMoreCard && (
+        <div
+          onClick={onViewMore}
+          style={{
+            border: "1px solid var(--panel-border)",
+            borderRadius: "var(--radius)",
+            padding: "1rem",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#2f7fd6",
+            fontWeight: "bold",
+          }}
+        >
+          Mostrar todos ({remaining > 0 ? `+${remaining}` : notes.length})
         </div>
       )}
     </div>
@@ -194,6 +302,9 @@ export default function LibraryHome({
   onViewTag,
   onViewAllNotes,
   onViewStatus,
+  onViewRecent,
+  onViewFavorites,
+  onToggleFavorite,
   onOpenNewNoteMenu,
   onFileDropped,
   onCreateBlank,
@@ -216,6 +327,12 @@ export default function LibraryHome({
   for (const note of notes) {
     statusCounts.set(note.status, (statusCounts.get(note.status) ?? 0) + 1);
   }
+
+  // Mais recente primeiro. Cortado a um teto generoso antes de passar pro
+  // CardRow — ele mesmo decide quantas cabem na largura disponível (nunca
+  // mais que isso em tela, então o resto seria descartado de qualquer forma).
+  const recentNotes = [...notes].sort((a, b) => b.lastActivityMs - a.lastActivityMs).slice(0, 12);
+  const favoriteNotes = notes.filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs).slice(0, 12);
 
   const sectionDividerStyle = { borderTop: "0.5px solid var(--panel-border)", paddingTop: "2rem", marginTop: "2rem" };
 
@@ -318,6 +435,35 @@ export default function LibraryHome({
         </div>
       </section>
 
+      {favoriteNotes.length > 0 && (
+        <section style={sectionDividerStyle}>
+          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Favoritas</h2>
+          <CardRow
+            notes={favoriteNotes}
+            onOpenNote={onOpenNote}
+            onRenameNote={onRenameNote}
+            onDeleteNote={onDeleteNote}
+            onViewMore={onViewFavorites}
+            onToggleFavorite={onToggleFavorite}
+          />
+        </section>
+      )}
+
+      {recentNotes.length > 0 && (
+        <section style={sectionDividerStyle}>
+          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Editados recentemente</h2>
+          <CardRow
+            notes={recentNotes}
+            getMeta={(note) => formatRelativeTime(note.lastActivityMs)}
+            onOpenNote={onOpenNote}
+            onRenameNote={onRenameNote}
+            onDeleteNote={onDeleteNote}
+            onViewMore={onViewRecent}
+            onToggleFavorite={onToggleFavorite}
+          />
+        </section>
+      )}
+
       {sortedTags.map(([tag, count]) => (
         <section key={tag} style={sectionDividerStyle}>
           <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
@@ -332,6 +478,7 @@ export default function LibraryHome({
             onRenameNote={onRenameNote}
             onDeleteNote={onDeleteNote}
             onViewMore={() => onViewTag(tag)}
+            onToggleFavorite={onToggleFavorite}
           />
         </section>
       ))}
@@ -349,6 +496,7 @@ export default function LibraryHome({
           onRenameNote={onRenameNote}
           onDeleteNote={onDeleteNote}
           onViewMore={() => onViewTag(null)}
+          onToggleFavorite={onToggleFavorite}
         />
       </section>
       </>

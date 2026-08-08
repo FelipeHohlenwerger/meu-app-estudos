@@ -124,7 +124,7 @@ export default function ChatPanel({
         const createRes = await vaultFetch("/api/note/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, blank: true }),
+          body: JSON.stringify({ title }),
         });
         const createData = await createRes.json();
         const newFilename: string | undefined = createData.filename;

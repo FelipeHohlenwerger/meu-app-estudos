@@ -3,19 +3,14 @@
 import { useState } from "react";
 import NoteRowMenu from "@/components/NoteRowMenu";
 import { STATUS_COLORS } from "@/lib/colors";
-import { STATUS_LABELS, defaultStatusFor, type ContentType } from "@/lib/noteStatus";
+import { STATUS_LABELS, defaultStatusFor } from "@/lib/noteStatus";
+// Fonte canônica em src/lib/vaultIndex.ts — reexportado aqui só pra não
+// quebrar os call sites que já importam LibraryNote a partir deste arquivo
+// (ex: page.tsx).
+import type { LibraryNote } from "@/lib/vaultIndex";
 
 export { STATUS_COLORS, STATUS_LABELS };
-
-export type LibraryNote = {
-  filename: string;
-  title: string;
-  tags: string[];
-  status: string;
-  contentType: ContentType;
-  summary: string;
-  wordCount: number;
-};
+export type { LibraryNote };
 
 const WORDS_PER_MINUTE = 200;
 
@@ -34,6 +29,23 @@ function MoreIcon() {
   );
 }
 
+export function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill={filled ? "#e0a83a" : "none"}
+      stroke={filled ? "#e0a83a" : "currentColor"}
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 2.5 15.09 8.76 22 9.77 17 14.64 18.18 21.52 12 18.25 5.82 21.52 7 14.64 2 9.77 8.91 8.76 12 2.5Z" />
+    </svg>
+  );
+}
+
 type Props = {
   note: LibraryNote;
   onClick: () => void;
@@ -42,9 +54,27 @@ type Props = {
   selectable?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
+  // Substitui o segundo segmento da meta ("· {readingTimeLabel}") por um
+  // texto pronto — usado pela seção "Editados recentemente" da Homepage pra
+  // mostrar tempo relativo ("há 12 min") no lugar do tempo de leitura, sem
+  // afetar nenhuma outra seção (que continua sem passar esse prop).
+  metaOverride?: string;
+  isFavorite: boolean;
+  onToggleFavorite: () => void;
 };
 
-export default function NoteCard({ note, onClick, onRename, onDelete, selectable, selected, onToggleSelect }: Props) {
+export default function NoteCard({
+  note,
+  onClick,
+  onRename,
+  onDelete,
+  selectable,
+  selected,
+  onToggleSelect,
+  metaOverride,
+  isFavorite,
+  onToggleFavorite,
+}: Props) {
   const fallbackStatus = defaultStatusFor(note.contentType);
   const statusColor = STATUS_COLORS[note.status] ?? STATUS_COLORS[fallbackStatus];
   const statusLabel = STATUS_LABELS[note.status] ?? STATUS_LABELS[fallbackStatus];
@@ -85,32 +115,51 @@ export default function NoteCard({ note, onClick, onRename, onDelete, selectable
         />
       )}
 
-      {showMenu && (
+      <div style={{ position: "absolute", top: "0.5rem", right: "0.5rem", display: "flex", alignItems: "center", gap: "0.1rem" }}>
         <button
           onClick={(e) => {
             e.stopPropagation();
-            const rect = e.currentTarget.getBoundingClientRect();
-            setMenuAnchor({ x: rect.right - 140, y: rect.bottom + 4 });
+            onToggleFavorite();
           }}
           className="toolbar-link"
-          title="Opções"
+          title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
           style={{
-            position: "absolute",
-            top: "0.5rem",
-            right: "0.5rem",
             padding: "0.3rem",
             border: "none",
             borderRadius: "4px",
             cursor: "pointer",
-            color: "var(--text-muted)",
             background: "transparent",
             display: "flex",
             alignItems: "center",
           }}
         >
-          <MoreIcon />
+          <StarIcon filled={isFavorite} />
         </button>
-      )}
+
+        {showMenu && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenuAnchor({ x: rect.right - 140, y: rect.bottom + 4 });
+            }}
+            className="toolbar-link"
+            title="Opções"
+            style={{
+              padding: "0.3rem",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+              color: "var(--text-muted)",
+              background: "transparent",
+              display: "flex",
+              alignItems: "center",
+            }}
+          >
+            <MoreIcon />
+          </button>
+        )}
+      </div>
 
       {menuAnchor && (
         <NoteRowMenu
@@ -134,7 +183,7 @@ export default function NoteCard({ note, onClick, onRename, onDelete, selectable
 
       <div
         className="note-card-title"
-        style={{ fontWeight: "bold", paddingRight: showMenu ? "1.5rem" : 0, paddingLeft: selectable ? "1.5rem" : 0 }}
+        style={{ fontWeight: "bold", paddingRight: showMenu ? "2.7rem" : "1.5rem", paddingLeft: selectable ? "1.5rem" : 0 }}
       >
         {note.title}
       </div>
@@ -161,7 +210,7 @@ export default function NoteCard({ note, onClick, onRename, onDelete, selectable
           }}
         />
         <span>
-          {statusLabel} · {readingTimeLabel(note.wordCount)}
+          {statusLabel} · {metaOverride ?? readingTimeLabel(note.wordCount)}
         </span>
       </div>
     </div>

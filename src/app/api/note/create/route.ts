@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { title, blank } = await request.json();
+    const { title } = await request.json();
     if (!title || typeof title !== "string" || !title.trim()) {
       return NextResponse.json({ error: "Campo 'title' é obrigatório" }, { status: 400 });
     }
@@ -31,9 +31,9 @@ export async function POST(request: NextRequest) {
     const filename = findAvailableFilename(baseSlug, (f) => existsSync(path.join(vault.path, f)));
 
     const filePath = path.join(vault.path, filename);
-    // "blank": criada pelo menu "Nota em branco" — sem H1 nenhum, já que o título
-    // exibido em qualquer lugar do app vem sempre do nome do arquivo, não do corpo.
-    const content = blank ? "" : `# ${trimmedTitle}\n\n`;
+    // Corpo sempre nasce vazio — o título exibido em qualquer lugar do app vem
+    // sempre do nome do arquivo, não do corpo, então um H1 aqui seria redundante.
+    const content = "";
     writeFileSync(filePath, content, "utf-8");
 
     ensureIndexFresh(vaultId);

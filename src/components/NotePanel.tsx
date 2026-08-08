@@ -26,6 +26,8 @@ import {
   setSelectedImageEffect,
   selectedImageField,
   codeBlockDecorationsField,
+  listIndentKeymap,
+  videoTimestampClickHandler,
 } from "@/lib/livePreview";
 import HighlightMenu from "@/components/HighlightMenu";
 import CommentModal from "@/components/CommentModal";
@@ -36,6 +38,7 @@ import ImageControlPanel from "@/components/ImageControlPanel";
 import StatusDropdown from "@/components/StatusDropdown";
 import FontSizePopup from "@/components/FontSizePopup";
 import TagField, { TagChips } from "@/components/TagField";
+import { StarIcon } from "@/components/NoteCard";
 import PdfNativeViewer from "@/components/PdfNativeViewer";
 import EpubViewer, { type EpubViewerHandle } from "@/components/EpubViewer";
 import BookCommentsPanel from "@/components/BookCommentsPanel";
@@ -61,7 +64,14 @@ const customHighlightStyle = HighlightStyle.define([
   { tag: tags.heading, textDecoration: "none", fontWeight: "normal" },
   { tag: tags.strong, fontWeight: "bold" },
   { tag: tags.emphasis, fontStyle: "italic" },
-  { tag: tags.link, color: "var(--accent)" },
+  // O parser de markdown tageia parte de "[[nota]]" como tags.link (colchetes
+  // aninhados) — isso gera um span ANINHADO dentro do <span class="wiki-link">
+  // de livePreview.ts, cobrindo o texto visível por cima. Precisa da MESMA cor
+  // (--link-color, ver globals.css), senão o texto do link fica com uma cor
+  // diferente da que a classe "wiki-link" define (bug real, achado ao testar
+  // a mudança pra --link-color: sem isso aqui, o texto continuava com a cor
+  // antiga --accent por baixo).
+  { tag: tags.link, color: "var(--link-color)" },
   { tag: tags.monospace, fontFamily: "monospace", color: "#ff6b6b" },
 ]);
 
@@ -140,6 +150,12 @@ function stripMdExtension(filename: string): string {
   return filename.replace(/\.(md|pdf|epub)$/i, "");
 }
 
+// Largura confortável de leitura, já validada pro corpo `.md` (coluna
+// centralizada em vez da largura inteira do painel) — reaproveitada também
+// pelo visualizador de PDF/EPUB (ver viewerKind), que antes não tinha
+// nenhum limite de largura.
+const READING_MAX_WIDTH = "760px";
+
 function buildLinkTargetsMap(targets: { filename: string; title: string; aliases: string[] }[]): LinkTargetsMap {
   const map: LinkTargetsMap = new Map();
   for (const t of targets) {
@@ -192,6 +208,7 @@ type NotePanelProps = {
   onLibraryChanged: () => void;
   onTagsChanged: (filename: string, tags: string[]) => void;
   onStatusChanged: (filename: string, status: string) => void;
+  onFavoriteChanged: (filename: string, isFavorite: boolean) => void;
   onFontSizeChange: (filename: string | null, size: number) => void;
   onToggleFontSizeOverride: (filename: string, checked: boolean, currentSize: number) => void;
   onNoteFontChange: (filename: string | null, font: NoteFontId) => void;
@@ -243,6 +260,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onNoteFontChange,
     onToggleNoteFontOverride,
     onCreateNoteFromLink,
+    onFavoriteChanged,
   },
   ref
 ) {
@@ -250,6 +268,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   const [content, setContent] = useState("");
   const [noteTags, setNoteTags] = useState<string[]>([]);
   const [status, setStatus] = useState("");
+  const [isFavorite, setIsFavorite] = useState(false);
   // Status de ESTUDO (dropdown no painel de controles) — nome diferente do
   // `status`/`setStatus` acima de propósito, que é só a mensagem de
   // "Salvando.../Salvo!" do autosave, sem relação nenhuma com isso.
@@ -463,6 +482,13 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onStatusChanged(filename, nextStatus);
   }
 
+  function handleFavoriteToggle() {
+    if (!filename) return;
+    const next = !isFavorite;
+    setIsFavorite(next);
+    onFavoriteChanged(filename, next);
+  }
+
   function handleExportHighlights() {
     if (!filename || highlightEntries.length === 0) return;
     generateHighlightsPdf(stripMdExtension(filename), highlightEntries);
@@ -584,6 +610,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           const nextContentType: ContentType = data.contentType ?? "note";
           setContentType(nextContentType);
           setStudyStatus(data.status ?? defaultStatusFor(nextContentType));
+          setIsFavorite(!!data.isFavorite);
         } else {
           setStatus("Erro ao carregar: " + data.error);
         }
@@ -1442,7 +1469,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       <section style={{ flex: 1, display: "flex", position: "relative", minWidth: 0, minHeight: 0 }}>
         <div style={{ flex: 1, padding: "2rem", display: "flex", flexDirection: "column", position: "relative", minWidth: 0, minHeight: 0, overflowY: "auto" }}>
           <div style={{ display: "flex", flexDirection: "column", minHeight: "100%", flexShrink: 0 }}>
-          <div style={{ maxWidth: "760px", width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flexShrink: 0 }}>
+          <div style={{ maxWidth: READING_MAX_WIDTH, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flexShrink: 0 }}>
             {filename && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -1471,6 +1498,22 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       minWidth: 0,
                     }}
                   />
+                  <button
+                    onClick={handleFavoriteToggle}
+                    className="toolbar-link"
+                    title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      padding: "0.2rem",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <StarIcon filled={isFavorite} />
+                  </button>
                   <TagField tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />
                 </div>
 
@@ -1663,33 +1706,37 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
             </div>
           )}
 
-          {viewerKind === "pdf" && filename && (
-            <PdfNativeViewer
-              key={activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page" ? activeViewerAnchor.value : "default"}
-              filename={filename}
-              initialPage={
-                activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page"
-                  ? parseInt(activeViewerAnchor.value, 10) || undefined
-                  : undefined
-              }
-            />
-          )}
-          {viewerKind === "epub" && filename && (
-            <EpubViewer
-              ref={epubViewerRef}
-              filename={filename}
-              theme={theme}
-              initialChapter={
-                activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "chapter"
-                  ? parseInt(activeViewerAnchor.value, 10) || undefined
-                  : undefined
-              }
-              onMarkerClick={handleEpubMarkerClick}
-            />
+          {viewerKind && filename && (
+            <div style={{ maxWidth: READING_MAX_WIDTH, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+              {viewerKind === "pdf" && (
+                <PdfNativeViewer
+                  key={activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page" ? activeViewerAnchor.value : "default"}
+                  filename={filename}
+                  initialPage={
+                    activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page"
+                      ? parseInt(activeViewerAnchor.value, 10) || undefined
+                      : undefined
+                  }
+                />
+              )}
+              {viewerKind === "epub" && (
+                <EpubViewer
+                  ref={epubViewerRef}
+                  filename={filename}
+                  theme={theme}
+                  initialChapter={
+                    activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "chapter"
+                      ? parseInt(activeViewerAnchor.value, 10) || undefined
+                      : undefined
+                  }
+                  onMarkerClick={handleEpubMarkerClick}
+                />
+              )}
+            </div>
           )}
 
           {!viewerKind && filename && (
-            <div style={{ maxWidth: "760px", width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flex: 1 }}>
+            <div style={{ maxWidth: READING_MAX_WIDTH, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flex: 1 }}>
               <CodeMirror
                 value={content}
                 onChange={(value) => setContent(value)}
@@ -1705,6 +1752,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   slashMenuField,
                   createCalloutSlashKeymap(Object.keys(calloutColorsPalette), (tipo, range) => insertCallout(tipo, range)),
                   calloutShortcutKeymap,
+                  listIndentKeymap,
+                  videoTimestampClickHandler,
                   linkTargetsField,
                   blockRefsField,
                   wikiLinkMenuField,

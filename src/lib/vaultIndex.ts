@@ -8,7 +8,7 @@ import { contentTypeFor, defaultStatusFor, statusOrderFor, type ContentType } fr
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
 // verdade) — a migração força um reprocessamento completo quando a versão sobe.
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 13;
 
 // Caminho da pasta de UM vault, resolvido pelo registro — nunca mais uma
 // constante fixa (ver src/lib/vaultRegistry.ts). Lança se o id não existir no
@@ -113,6 +113,12 @@ function migrate(conn: DatabaseSync): void {
   if (!hasColumn("fonte")) {
     conn.exec("ALTER TABLE notes ADD COLUMN fonte TEXT");
   }
+  if (!hasColumn("last_activity_ms")) {
+    conn.exec("ALTER TABLE notes ADD COLUMN last_activity_ms INTEGER");
+  }
+  if (!hasColumn("is_favorite")) {
+    conn.exec("ALTER TABLE notes ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0");
+  }
   conn.exec("CREATE INDEX IF NOT EXISTS idx_notes_title ON notes(title)");
   conn.exec("CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias)");
 
@@ -172,6 +178,19 @@ function migrate(conn: DatabaseSync): void {
     // certo pro contentType da nota, então cada uma recupera um status válido
     // já na próxima leitura, sem precisar reprocessar o arquivo.
     conn.exec("UPDATE notes SET status = NULL");
+  }
+
+  if (versionRow.user_version < 12) {
+    // A partir da v12, "última atividade" (usada pela seção "Editados
+    // recentemente" da Homepage) passa a ser rastreada em last_activity_ms —
+    // horário de parede observado pelo app (touchActivity(), ver save de
+    // nota/comentário/status), não mtime de arquivo (congelado desde a
+    // importação pra PDF/EPUB, já que o app nunca reescreve esses bytes).
+    // Semeia a partir do mtime_ms atual (ainda intacto nesse ponto, antes do
+    // reset incondicional abaixo) — dá uma ordenação inicial útil pras notas
+    // .md; livros ficam agrupados na data de importação até a primeira
+    // atividade de verdade (comentário/status) neles.
+    conn.exec("UPDATE notes SET last_activity_ms = mtime_ms WHERE last_activity_ms IS NULL");
   }
 
   // Força reprocessar toda a vault na próxima ensureIndexFresh() — título, aliases,
@@ -332,7 +351,7 @@ function reindexNote(vaultId: string, filename: string, content: string, mtimeMs
   try {
     conn
       .prepare(
-        `INSERT INTO notes (filename, mtime_ms, title, status, summary, word_count, fonte) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO notes (filename, mtime_ms, title, status, summary, word_count, fonte, last_activity_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(filename) DO UPDATE SET
            mtime_ms = excluded.mtime_ms,
            title = excluded.title,
@@ -340,7 +359,15 @@ function reindexNote(vaultId: string, filename: string, content: string, mtimeMs
            word_count = excluded.word_count,
            fonte = excluded.fonte`
       )
-      .run(filename, mtimeMs, title, defaultStatus, summary, wordCount, fonte);
+      // last_activity_ms, igual a status: só entra no INSERT (semeia com o
+      // mtimeMs recebido — "quando essa nota/livro foi visto pela primeira
+      // vez"), NUNCA atualizado no conflito. Se fosse atualizado aqui, uma
+      // reconciliação passiva (disparada por qualquer migração futura via
+      // `UPDATE notes SET mtime_ms = -1`, ou por alguém externo tocando o
+      // arquivo) reescalonaria a atividade de notas que ninguém realmente
+      // tocou. Atividade de verdade é sempre um touchActivity() explícito
+      // (save real, comentário, mudança de status — ver chamadas abaixo).
+      .run(filename, mtimeMs, title, defaultStatus, summary, wordCount, fonte, mtimeMs);
 
     const noteRow = conn.prepare("SELECT id FROM notes WHERE filename = ?").get(filename) as { id: number };
     const noteId = noteRow.id;
@@ -438,6 +465,16 @@ export function ensureIndexFresh(vaultId: string, opts: { forceMaxAgeMs?: number
 
 export { reindexNote };
 
+// Marca "atividade agora" numa nota — usado pela seção "Editados
+// recentemente" da Homepage. Chamado só nos pontos de atividade de verdade
+// (save real de .md, criar/apagar comentário, mudar status) — nunca pela
+// reconciliação passiva (ver comentário em reindexNote sobre por que
+// last_activity_ms fica de fora do ON CONFLICT DO UPDATE de lá).
+export function touchActivity(vaultId: string, filename: string): void {
+  const conn = getDb(vaultId);
+  conn.prepare("UPDATE notes SET last_activity_ms = ? WHERE filename = ? COLLATE NOCASE").run(Date.now(), filename);
+}
+
 // Fecha a conexão SQLite (se aberta) e apaga a pasta de índice inteira do
 // vault — usado por DELETE /api/vaults ao remover um vault do registro.
 // Nunca toca na pasta de notas original (isso é responsabilidade só de
@@ -516,17 +553,20 @@ export function setNoteTags(vaultId: string, filename: string, tags: string[]): 
   }
 }
 
-// Status de estudo + tipo de conteúdo (livro/artigo vs. nota comum) de UMA
-// nota — usado por GET /api/note pra alimentar o StatusDropdown ao carregar a
-// nota.
-export function getNoteStatusInfo(vaultId: string, filename: string): { status: string; contentType: ContentType } | null {
+// Status de estudo + tipo de conteúdo (livro/artigo vs. nota comum) + favorito
+// de UMA nota — usado por GET /api/note pra alimentar o StatusDropdown/estrela
+// ao carregar a nota (uma query só, já que os três vêm da mesma linha).
+export function getNoteStatusInfo(
+  vaultId: string,
+  filename: string
+): { status: string; contentType: ContentType; isFavorite: boolean } | null {
   const conn = getDb(vaultId);
-  const row = conn.prepare("SELECT status, fonte FROM notes WHERE filename = ? COLLATE NOCASE").get(filename) as
-    | { status: string | null; fonte: string | null }
+  const row = conn.prepare("SELECT status, fonte, is_favorite FROM notes WHERE filename = ? COLLATE NOCASE").get(filename) as
+    | { status: string | null; fonte: string | null; is_favorite: number }
     | undefined;
   if (!row) return null;
   const contentType = contentTypeFor(filename, row.fonte);
-  return { status: row.status ?? defaultStatusFor(contentType), contentType };
+  return { status: row.status ?? defaultStatusFor(contentType), contentType, isFavorite: row.is_favorite === 1 };
 }
 
 // Muda o status de estudo de uma nota — único caminho de escrita da coluna
@@ -546,6 +586,15 @@ export function setNoteStatus(vaultId: string, filename: string, status: string)
   }
 
   conn.prepare("UPDATE notes SET status = ? WHERE filename = ? COLLATE NOCASE").run(status, filename);
+  touchActivity(vaultId, filename);
+}
+
+// Marca/desmarca uma nota como favorita — não conta como "atividade" pra
+// seção "Editados recentemente" (só save de conteúdo, comentário ou mudança
+// de status contam, ver touchActivity), por isso não chama touchActivity.
+export function setNoteFavorite(vaultId: string, filename: string, isFavorite: boolean): void {
+  const conn = getDb(vaultId);
+  conn.prepare("UPDATE notes SET is_favorite = ? WHERE filename = ? COLLATE NOCASE").run(isFavorite ? 1 : 0, filename);
 }
 
 export function getTagsByNote(vaultId: string): Record<string, string[]> {
@@ -622,12 +671,18 @@ export function createBookComment(
   const result = conn
     .prepare("INSERT INTO book_comments (note_id, tipo, comment, anchored, anchor_cfi, anchor_text) VALUES (?, ?, ?, ?, ?, ?)")
     .run(noteRow.id, tipo, comment, anchored, anchorCfi, anchorText);
+  touchActivity(vaultId, filename);
 
   return { id: Number(result.lastInsertRowid), tipo, comment, anchored: !!data.anchored, anchorCfi, anchorText };
 }
 
 export function deleteBookComment(vaultId: string, id: number): void {
   const conn = getDb(vaultId);
+  // Sem `filename` disponível aqui (só o id do comentário) — resolve o
+  // note_id direto pra tocar last_activity_ms antes de apagar a linha.
+  conn
+    .prepare("UPDATE notes SET last_activity_ms = ? WHERE id = (SELECT note_id FROM book_comments WHERE id = ?)")
+    .run(Date.now(), id);
   conn.prepare("DELETE FROM book_comments WHERE id = ?").run(id);
 }
 
@@ -639,6 +694,11 @@ export type LibraryNote = {
   contentType: ContentType;
   summary: string;
   wordCount: number;
+  // Horário de parede (ms) da última atividade observada pelo app (save,
+  // comentário, mudança de status) — ver touchActivity(). Usado pela seção
+  // "Editados recentemente" da Homepage.
+  lastActivityMs: number;
+  isFavorite: boolean;
 };
 
 // Dados pra tela inicial "biblioteca": uma linha por nota, já com tags/status/
@@ -646,7 +706,7 @@ export type LibraryNote = {
 export function getLibraryData(vaultId: string): LibraryNote[] {
   const conn = getDb(vaultId);
   const notesRows = conn
-    .prepare("SELECT id, filename, title, status, summary, word_count, fonte FROM notes ORDER BY filename")
+    .prepare("SELECT id, filename, title, status, summary, word_count, fonte, last_activity_ms, is_favorite FROM notes ORDER BY filename")
     .all() as {
     id: number;
     filename: string;
@@ -655,6 +715,8 @@ export function getLibraryData(vaultId: string): LibraryNote[] {
     summary: string | null;
     word_count: number | null;
     fonte: string | null;
+    last_activity_ms: number | null;
+    is_favorite: number;
   }[];
   const tagsRows = conn.prepare("SELECT note_id, tag FROM tags").all() as { note_id: number; tag: string }[];
 
@@ -675,6 +737,8 @@ export function getLibraryData(vaultId: string): LibraryNote[] {
       contentType,
       summary: n.summary ?? "",
       wordCount: n.word_count ?? 0,
+      lastActivityMs: n.last_activity_ms ?? 0,
+      isFavorite: n.is_favorite === 1,
     };
   });
 }

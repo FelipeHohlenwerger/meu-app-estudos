@@ -65,3 +65,14 @@ export const STATUS_COLORS: Record<string, string> = {
 
 // Fundo "espaço" do Graph View (painel lateral e overlay de tela cheia).
 export const GRAPH_SPACE_BACKGROUND = "#17181a";
+
+// Cor por nível de heading (# até ######) no corpo da nota — índice 0 = H1.
+// Só cor; tamanho de fonte continua definido separadamente em livePreview.ts.
+export const HEADING_COLORS: string[] = [
+  "#c99a5b", // H1 — âmbar
+  "#7fb0a8", // H2 — verde-azulado suave
+  "#8aa4c9", // H3 — azul acinzentado
+  "#b58fc2", // H4 — lilás suave
+  "#c98a8a", // H5 — terracota suave
+  "#9a9483", // H6 — cinza-oliva neutro
+];

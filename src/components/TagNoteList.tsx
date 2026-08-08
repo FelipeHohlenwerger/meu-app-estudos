@@ -11,6 +11,12 @@ type Props = {
   onRenameNote: (filename: string) => void;
   onDeleteNote: (filename: string) => void;
   onDeleteMultiple: (filenames: string[]) => void;
+  // Substitui o "N min de leitura" da meta por um texto calculado por nota —
+  // usado pela lista "Editados recentemente" (ver page.tsx) pra mostrar tempo
+  // relativo em vez de tempo de leitura, já que a lista está ordenada por
+  // recência. Nenhum outro caller passa isso, então nada muda pra eles.
+  metaForNote?: (note: LibraryNote) => string;
+  onToggleFavorite: (filename: string) => void;
 };
 
 export default function TagNoteList({
@@ -21,6 +27,8 @@ export default function TagNoteList({
   onRenameNote,
   onDeleteNote,
   onDeleteMultiple,
+  metaForNote,
+  onToggleFavorite,
 }: Props) {
   const heading = headingOverride ?? tag ?? "Sem categoria";
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -116,12 +124,15 @@ export default function TagNoteList({
           <NoteCard
             key={note.filename}
             note={note}
+            metaOverride={metaForNote?.(note)}
             onClick={() => onOpenNote(note.filename)}
             onRename={() => onRenameNote(note.filename)}
             onDelete={() => onDeleteNote(note.filename)}
             selectable
             selected={selected.has(note.filename)}
             onToggleSelect={() => toggleSelect(note.filename)}
+            isFavorite={note.isFavorite}
+            onToggleFavorite={() => onToggleFavorite(note.filename)}
           />
         ))}
       </div>

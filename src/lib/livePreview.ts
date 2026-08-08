@@ -1,4 +1,5 @@
 import { syntaxTree } from "@codemirror/language";
+import type { SyntaxNode } from "@lezer/common";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate, keymap } from "@codemirror/view";
 import { EditorState, RangeSetBuilder } from "@codemirror/state";
 import { WidgetType } from "@codemirror/view";
@@ -12,8 +13,9 @@ import {
   type ImageShape,
   type ImageAlign,
 } from "@/lib/imageSyntax";
-import { highlightColors, underlineColors, calloutColors } from "@/lib/colors";
+import { highlightColors, underlineColors, calloutColors, HEADING_COLORS } from "@/lib/colors";
 import { CodeBlockWidget, MermaidWidget } from "@/lib/codeBlockWidget";
+import { parseVideoEmbedUrl } from "@/lib/videoEmbed";
 
 // Vault ativo, pro ImageWidget montar a URL de anexos locais (/api/attachments
 // precisa saber de qual vault). Este arquivo não é um componente React (é
@@ -32,12 +34,14 @@ const boldMark = Decoration.mark({ attributes: { style: "font-weight: bold" } })
 const italicMark = Decoration.mark({ attributes: { style: "font-style: italic" } });
 
 const headingMarks = [
-  Decoration.mark({ attributes: { style: "font-size: 1.8em; font-weight: bold;" } }),
-  Decoration.mark({ attributes: { style: "font-size: 1.6em; font-weight: bold;" } }),
-  Decoration.mark({ attributes: { style: "font-size: 1.4em; font-weight: bold;" } }),
-  Decoration.mark({ attributes: { style: "font-size: 1.2em; font-weight: bold;" } }),
-  Decoration.mark({ attributes: { style: "font-size: 1.1em; font-weight: bold;" } }),
-  Decoration.mark({ attributes: { style: "font-size: 1em; font-weight: bold; opacity: 0.8;" } }),
+  Decoration.mark({ attributes: { style: `font-size: 1.8em; font-weight: bold; color: ${HEADING_COLORS[0]};` } }),
+  Decoration.mark({ attributes: { style: `font-size: 1.6em; font-weight: bold; color: ${HEADING_COLORS[1]};` } }),
+  Decoration.mark({ attributes: { style: `font-size: 1.4em; font-weight: bold; color: ${HEADING_COLORS[2]};` } }),
+  Decoration.mark({ attributes: { style: `font-size: 1.2em; font-weight: bold; color: ${HEADING_COLORS[3]};` } }),
+  Decoration.mark({ attributes: { style: `font-size: 1.1em; font-weight: bold; color: ${HEADING_COLORS[4]};` } }),
+  Decoration.mark({
+    attributes: { style: `font-size: 1em; font-weight: bold; opacity: 0.8; color: ${HEADING_COLORS[5]};` },
+  }),
 ];
 
 // highlightColors/underlineColors/calloutColors vêm de @/lib/colors (fonte
@@ -260,11 +264,10 @@ function highlightMarkFor(tipo: string) {
   return Decoration.mark({ attributes: { style: `background-color: ${color}; color: #1a1a1a; border-radius: 2px;` } });
 }
 
-// Link válido: cor de acento (mesma dos links no highlight de sintaxe), clicável.
+// Link válido: cor/sublinhado/hover vêm da classe "wiki-link" (ver globals.css).
 function wikiLinkMarkFor(filename: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: var(--accent); cursor: pointer;",
       class: "wiki-link",
       "data-target-filename": filename,
     },
@@ -284,12 +287,11 @@ function brokenWikiLinkMarkFor(rawTarget: string) {
 }
 
 // Referência de página válida ([[arquivo#p42]], só PDF — tem página de
-// verdade): mesma cor de acento do link normal, com o dado extra de qual
-// página abrir.
+// verdade): mesmo estilo do link normal (classe "wiki-page-link", ver
+// globals.css), com o dado extra de qual página abrir.
 function wikiPageLinkMarkFor(filename: string, pageRaw: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: var(--accent); cursor: pointer;",
       class: "wiki-page-link",
       "data-target-filename": filename,
       "data-target-page": pageRaw,
@@ -310,13 +312,12 @@ function brokenWikiPageLinkMarkFor(rawTarget: string) {
 }
 
 // Referência de capítulo válida ([[arquivo#cap3]], só EPUB — não tem página
-// fixa, mas tem divisão natural em capítulos pelo spine): mesma cor de acento
-// do link normal, com o dado extra de qual capítulo abrir (número pela ordem
-// natural do spine, 1-based).
+// fixa, mas tem divisão natural em capítulos pelo spine): mesmo estilo do link
+// normal (classe "wiki-chapter-link", ver globals.css), com o dado extra de
+// qual capítulo abrir (número pela ordem natural do spine, 1-based).
 function wikiChapterLinkMarkFor(filename: string, chapterRaw: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: var(--accent); cursor: pointer;",
       class: "wiki-chapter-link",
       "data-target-filename": filename,
       "data-target-chapter": chapterRaw,
@@ -336,24 +337,40 @@ function brokenWikiChapterLinkMarkFor(rawTarget: string) {
   });
 }
 
-// Marcador de nota de rodapé "[^id]": estilo de link, mas nada precisa ser
-// escondido — o próprio "[^id]" já é o texto visível, só fica destacado/clicável.
+// Marcador de nota de rodapé "[^id]": estilo de link (classe "footnote-ref",
+// ver globals.css), mas nada precisa ser escondido — o próprio "[^id]" já é o
+// texto visível, só fica destacado/clicável. font-size/vertical-align são só
+// dela, ficam inline (não fazem parte do estilo compartilhado de link).
 function footnoteRefMarkFor(id: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: var(--accent); cursor: pointer; font-size: 0.8em; vertical-align: super;",
+      style: "font-size: 0.8em; vertical-align: super;",
       class: "footnote-ref",
       "data-footnote-id": id,
     },
   });
 }
 
-// Referência de bloco válida ([[nota#^id]] com bloco encontrado): mesma cor de
-// acento do link normal, mas com dados extras pro clique rolar até o parágrafo.
+// Timestamp clicável ("mm:ss"/"h:mm:ss"): mesmo estilo de link (classe
+// "video-timestamp", ver globals.css). O texto em si já é o "mm:ss" digitado
+// — nada precisa ser escondido/revelado, diferente de wiki-link. `seconds` vai
+// num data-attribute pro click handler (videoTimestampClickHandler) ler sem
+// precisar reparsear o texto.
+function timestampMarkFor(seconds: number) {
+  return Decoration.mark({
+    attributes: {
+      class: "video-timestamp",
+      "data-timestamp-seconds": String(seconds),
+    },
+  });
+}
+
+// Referência de bloco válida ([[nota#^id]] com bloco encontrado): mesmo estilo
+// do link normal (classe "wiki-block-link", ver globals.css), mas com dados
+// extras pro clique rolar até o parágrafo.
 function blockLinkMarkFor(filename: string, blockId: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: var(--accent); cursor: pointer;",
       class: "wiki-block-link",
       "data-target-filename": filename,
       "data-target-block": blockId,
@@ -393,6 +410,13 @@ export const COMMENT_REGEX = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
 // Reconhece a REFERÊNCIA de nota de rodapé "[^id]" (não a definição "[^id]:",
 // que fica de fora via o "(?!:)" — essa continua visível como markdown puro).
 const FOOTNOTE_REF_REGEX = /\[\^([^\]]+)\](?!:)/g;
+
+// Reconhece um timestamp "mm:ss" ou "h:mm:ss" solto no texto — sem sintaxe
+// nova, é o próprio texto digitado (ex: "12:34" ou "1:02:03") que vira link
+// clicável (ver timestampMarkFor/videoTimestampClickHandler). Segundos (e
+// minutos, quando há horas) sempre com 2 dígitos 0-59 — isso já exclui coisas
+// como "16:9" (proporção) de virarem timestamp por engano.
+const TIMESTAMP_REGEX = /\b(?:(\d{1,2}):)?([0-5]?\d):([0-5]\d)\b/g;
 
 
 // Reconhece: ==texto destacado==§tipo
@@ -594,6 +618,116 @@ class ImageWidget extends WidgetType {
     return event.type === "mousedown" || event.type === "click";
   }
 }
+
+// Embed de vídeo (YouTube/Vimeo) — a linha inteira com a URL crua (ver
+// parseVideoEmbedUrl em videoEmbed.ts) vira um player embutido, só
+// referenciando a URL original (nada baixado/armazenado no vault, mesmo
+// princípio já usado pra imagens de artigo importado da web). Decoração de
+// bloco (block: true), então é aplicada em buildCodeBlockDecorations junto
+// com blocos de código/Mermaid — não pode vir do ViewPlugin principal.
+class VideoEmbedWidget extends WidgetType {
+  constructor(
+    private embedUrl: string,
+    private provider: "youtube" | "vimeo",
+    private from: number
+  ) {
+    super();
+  }
+
+  eq(other: VideoEmbedWidget) {
+    return other.embedUrl === this.embedUrl && other.provider === this.provider && other.from === this.from;
+  }
+
+  toDOM() {
+    const container = document.createElement("div");
+    container.style.background = "var(--panel-bg)";
+    container.style.border = "1px solid var(--panel-border)";
+    container.style.borderRadius = "8px";
+    container.style.padding = "0.5rem";
+    container.style.margin = "0.4rem 0";
+    // Lidos por videoTimestampClickHandler pra achar "o vídeo mais próximo
+    // acima" de um timestamp clicado, sem precisar cruzar dado com o
+    // StateField principal (que é onde os timestamps são decorados) na hora
+    // de construir a decoração — resolvido só em tempo de clique, direto no DOM.
+    container.dataset.videoEmbedFrom = String(this.from);
+    container.dataset.videoProvider = this.provider;
+
+    const frameWrap = document.createElement("div");
+    frameWrap.style.position = "relative";
+    frameWrap.style.width = "100%";
+    frameWrap.style.aspectRatio = "16 / 9";
+
+    const iframe = document.createElement("iframe");
+    iframe.src = this.embedUrl;
+    iframe.style.position = "absolute";
+    iframe.style.inset = "0";
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "none";
+    iframe.style.borderRadius = "4px";
+    iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture";
+    iframe.allowFullscreen = true;
+
+    frameWrap.appendChild(iframe);
+    container.appendChild(frameWrap);
+    return container;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
+// Manda o comando de "pular pro tempo X" direto pro protocolo de postMessage
+// já documentado de cada player, sem carregar nenhum SDK externo
+// (iframe_api.js/player.js) — evita dependência de rede extra só pra isso,
+// mesmo espírito de "só referencia a URL" do embed. Não recarrega o iframe.
+function seekEmbeddedVideo(iframe: HTMLIFrameElement, provider: string, seconds: number) {
+  if (!iframe.contentWindow) return;
+  if (provider === "youtube") {
+    iframe.contentWindow.postMessage(JSON.stringify({ event: "command", func: "seekTo", args: [seconds, true] }), "*");
+    iframe.contentWindow.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [] }), "*");
+  } else if (provider === "vimeo") {
+    iframe.contentWindow.postMessage(JSON.stringify({ method: "setCurrentTime", value: seconds }), "*");
+    iframe.contentWindow.postMessage(JSON.stringify({ method: "play" }), "*");
+  }
+}
+
+// Clique num timestamp (".video-timestamp", ver timestampMarkFor): acha o
+// embed de vídeo mais próximo ACIMA dele no documento (maior
+// data-video-embed-from que ainda seja <= a posição clicada — cobre bem o
+// caso de vários vídeos na mesma nota) e manda pular pro tempo certo. Sem
+// estado React nenhum (só DOM), por isso pode ficar self-contained aqui — só
+// precisa entrar no array de extensions do CodeMirror em NotePanel.tsx.
+export const videoTimestampClickHandler = EditorView.domEventHandlers({
+  mousedown(event, view) {
+    const target = event.target as HTMLElement;
+    const tsEl = target.closest(".video-timestamp") as HTMLElement | null;
+    if (!tsEl) return false;
+    const seconds = Number(tsEl.getAttribute("data-timestamp-seconds"));
+    if (Number.isNaN(seconds)) return false;
+
+    const pos = view.posAtDOM(tsEl);
+    const wraps = view.dom.querySelectorAll<HTMLElement>("[data-video-embed-from]");
+    let bestFrom = -1;
+    let bestIframe: HTMLIFrameElement | null = null;
+    let bestProvider = "";
+    for (const wrap of wraps) {
+      const from = Number(wrap.getAttribute("data-video-embed-from"));
+      if (from > pos || from <= bestFrom) continue;
+      const iframe = wrap.querySelector("iframe");
+      if (!iframe) continue;
+      bestFrom = from;
+      bestIframe = iframe;
+      bestProvider = wrap.getAttribute("data-video-provider") ?? "";
+    }
+    if (!bestIframe) return false;
+
+    seekEmbeddedVideo(bestIframe, bestProvider, seconds);
+    event.preventDefault();
+    return true;
+  },
+});
 
 // Rastreia qual imagem está selecionada (painel de tamanho/recorte aberto),
 // pra desenhar o contorno de destaque nela — mesmo padrão do
@@ -921,6 +1055,54 @@ export function createWikiLinkKeymap(
 }
 
 
+// Tab/Shift-Tab dentro de um item de lista aumenta/diminui o nível de
+// aninhamento — não existia nenhum atalho de Tab no editor antes disso (Tab
+// fora de uma lista continua sem fazer nada aqui, deixando o navegador tirar
+// o foco do editor, comportamento padrão). 4 espaços por nível: suficiente
+// pra ultrapassar o limiar de continuação do CommonMark tanto pra marcadores
+// "-"/"*" (2 colunas) quanto pra a maioria dos numerados ("1."/"99.", 3-4
+// colunas), então dispara o reconhecimento de aninhamento pelo parser de
+// forma confiável. A profundidade visual (padding-left/linha-guia, ver
+// buildListGuideStyle) vem da árvore de sintaxe, não da contagem de espaços
+// — então um Tab pode "não fazer nada visualmente" se não houver
+// item-irmão anterior pra aninhar sob; isso é o parser funcionando certo,
+// não um bug. Escopo: só a linha do cursor, sem indentar seleção múltipla.
+const LIST_TAB_INDENT = "    ";
+
+export const listIndentKeymap = Prec.highest(
+  keymap.of([
+    {
+      key: "Tab",
+      run(view) {
+        const pos = view.state.selection.main.head;
+        if (listItemDepthAt(view, pos) === 0) return false;
+        const line = view.state.doc.lineAt(pos);
+        view.dispatch({
+          changes: { from: line.from, insert: LIST_TAB_INDENT },
+          selection: { anchor: pos + LIST_TAB_INDENT.length },
+        });
+        return true;
+      },
+    },
+    {
+      key: "Shift-Tab",
+      run(view) {
+        const pos = view.state.selection.main.head;
+        if (listItemDepthAt(view, pos) === 0) return false;
+        const line = view.state.doc.lineAt(pos);
+        const leadingMatch = /^ */.exec(line.text);
+        const removeLen = Math.min(LIST_TAB_INDENT.length, leadingMatch ? leadingMatch[0].length : 0);
+        if (removeLen === 0) return true; // já sem recuo — consome o evento, mas não faz nada
+        view.dispatch({
+          changes: { from: line.from, to: line.from + removeLen, insert: "" },
+          selection: { anchor: Math.max(line.from, pos - removeLen) },
+        });
+        return true;
+      },
+    },
+  ])
+);
+
 const bulletReplace = Decoration.replace({ widget: new BulletWidget() });
 
 // Decoration que "esconde" um trecho (os símbolos ** ou #, por exemplo)
@@ -1021,6 +1203,80 @@ class BlockEmbedWidget extends WidgetType {
   }
 }
 
+// Recuo fixo (estilo Obsidian) por nível de lista aninhada — independente da
+// contagem de espaços no texto ou da fonte escolhida (as 5 fontes de
+// fonts.ts são proporcionais, não monoespaçadas, então espaço em branco cru
+// nunca teria largura fixa por conta própria). LIST_GUIDE_OFFSET é onde,
+// dentro de cada coluna de 54px, a linha vertical fica (roughly onde um
+// marcador de bullet aninhado apareceria) — ajustado visualmente, não deriva
+// de nada.
+const LIST_INDENT_PX = 54;
+const LIST_GUIDE_OFFSET_PX = 9;
+const LIST_GUIDE_TICK_WIDTH_PX = 20;
+const LIST_GUIDE_COLOR = "var(--panel-border)";
+
+// Profundidade de aninhamento de listas na posição `pos`: conta quantos nós
+// ListItem existem entre o nó mais interno ali e a raiz, usando o entendimento
+// do próprio parser (CommonMark-aware) em vez de contar espaços — funciona
+// mesmo em notas antigas com indentação irregular (2 espaços, tabs, etc.),
+// sem precisar de nenhuma "correção". 0 = fora de qualquer lista; 1 = primeiro
+// nível (sem recuo visual); 2+ = níveis aninhados (recebem padding-left e
+// linha-guia abaixo).
+// `side`: -1 resolve pro nó que TERMINA em `pos` (certo pra checar onde o
+// cursor está — ele quase sempre fica no fim do que acabou de ser digitado);
+// 1 resolve pro nó que COMEÇA em `pos` (certo pro início de uma linha, ver
+// uso abaixo). Usar o lado errado pode resolver pro nó VIZINHO (fora do
+// ListItem) bem na borda entre eles — foi exatamente esse bug que apareceu
+// ao testar o Tab com o cursor no fim da linha.
+function listItemDepthAt(view: EditorView, pos: number, side: -1 | 1 = -1): number {
+  let node: SyntaxNode | null = syntaxTree(view.state).resolveInner(pos, side);
+  let depth = 0;
+  while (node) {
+    if (node.name === "ListItem") depth++;
+    node = node.parent;
+  }
+  return depth;
+}
+
+// Um único `style` combinado (mesmo padrão de calloutLineAttrs): padding-left
+// fixo pelo nível + uma linha vertical por nível ancestral (a "coluna" de
+// cada pai, corrida por toda a altura da linha — simplificação aceita pra v1:
+// não para exatamente no último filho de cada pai, exigiria olhar os irmãos
+// seguintes) + um traço horizontal curto no próprio nível do item, conectando
+// a última linha vertical (a coluna do pai imediato) até o marcador — o
+// "elbow" que indica onde este item se conecta. Tudo via `background-image`
+// em camadas (múltiplos `linear-gradient` de 1px, cada um só na posição
+// exata) — a única forma de desenhar várias linhas finas posicionadas com
+// precisão dentro de um único atributo `style` de linha, sem introduzir
+// classes/pseudo-elementos CSS novos.
+function buildListGuideStyle(nestingLevel: number): string {
+  // nestingLevel = listItemDepthAt() - 1: 0 no primeiro nível (sem recuo).
+  if (nestingLevel <= 0) return "";
+
+  const layers: string[] = [];
+  const sizes: string[] = [];
+  const positions: string[] = [];
+
+  for (let level = 0; level < nestingLevel; level++) {
+    layers.push(`linear-gradient(${LIST_GUIDE_COLOR}, ${LIST_GUIDE_COLOR})`);
+    sizes.push("1px 100%");
+    positions.push(`${level * LIST_INDENT_PX + LIST_GUIDE_OFFSET_PX}px 0`);
+  }
+
+  // Traço horizontal: da última coluna (pai imediato) até perto do marcador.
+  layers.push(`linear-gradient(${LIST_GUIDE_COLOR}, ${LIST_GUIDE_COLOR})`);
+  sizes.push(`${LIST_GUIDE_TICK_WIDTH_PX}px 1px`);
+  positions.push(`${(nestingLevel - 1) * LIST_INDENT_PX + LIST_GUIDE_OFFSET_PX}px 50%`);
+
+  return (
+    `padding-left: ${nestingLevel * LIST_INDENT_PX}px; ` +
+    `background-image: ${layers.join(", ")}; ` +
+    `background-size: ${sizes.join(", ")}; ` +
+    `background-position: ${positions.join(", ")}; ` +
+    `background-repeat: no-repeat;`
+  );
+}
+
 function buildDecorations(view: EditorView): DecorationSet {
   type Entry = { from: number; to: number; decoration: Decoration };
   const entries: Entry[] = [];
@@ -1087,6 +1343,20 @@ function buildDecorations(view: EditorView): DecorationSet {
               });
             }
           }
+
+          // Esconde o espaço em branco cru antes do marcador — o recuo fixo
+          // (padding-left, ver buildListGuideStyle abaixo) já cuida da
+          // posição visual, então esse espaço só serviria pra "empurrar"
+          // duas vezes. Só quando o cursor não está tocando a linha (mesma
+          // convenção de negrito/itálico/heading acima): esconder pra
+          // sempre tornaria Backspace/edição manual do recuo praticamente
+          // inutilizável em notas com indentação irregular, já que o cursor
+          // pode ficar logicamente dentro do intervalo escondido sem
+          // nenhuma pista visual de quanto ainda há ali.
+          const markerLine = view.state.doc.lineAt(node.from);
+          if (node.from > markerLine.from && !cursorTouches(view, markerLine.from, node.from)) {
+            entries.push({ from: markerLine.from, to: node.from, decoration: hideMark });
+          }
         }
 
         // --- CHECKBOX (task list) ---
@@ -1098,6 +1368,30 @@ function buildDecorations(view: EditorView): DecorationSet {
         }
       },
     });
+
+    // --- RECUO + LINHA-GUIA DE LISTA ANINHADA — por LINHA visível, não por
+    // entrada/saída de ListItem na árvore: cobre corretamente linhas de
+    // continuação (item com mais de um parágrafo) que pertencem ao mesmo
+    // ListItem mas não têm nenhum ListMark nelas. Ver buildListGuideStyle.
+    {
+      let linePos = from;
+      while (linePos <= to) {
+        const line = view.state.doc.lineAt(linePos);
+        // Resolve no FIM da linha (não no início) — resolver dentro do
+        // espaço em branco inicial de uma linha aninhada faz o parser
+        // enxergar uma posição ainda "de fora" do ListItem mais interno
+        // (a estrutura aninhada só começa depois de toda a indentação).
+        const nestingLevel = listItemDepthAt(view, line.to, -1) - 1;
+        if (nestingLevel > 0) {
+          const style = buildListGuideStyle(nestingLevel);
+          if (style) {
+            entries.push({ from: line.from, to: line.from, decoration: Decoration.line({ attributes: { style } }) });
+          }
+        }
+        if (line.to >= to) break;
+        linePos = line.to + 1;
+      }
+    }
 
     // --- HIGHLIGHT (==texto==§tipo) e SUBLINHADO (==texto==§tipo:sub) — via regex ---
     const text = view.state.doc.sliceString(from, to);
@@ -1158,6 +1452,19 @@ function buildDecorations(view: EditorView): DecorationSet {
       const fullEnd = fullStart + footnoteMatch[0].length;
       const id = footnoteMatch[1];
       entries.push({ from: fullStart, to: fullEnd, decoration: footnoteRefMarkFor(id) });
+    }
+
+    // --- TIMESTAMP DE VÍDEO (mm:ss / h:mm:ss) — clicável, ver videoTimestampClickHandler ---
+    TIMESTAMP_REGEX.lastIndex = 0;
+    let timestampMatch: RegExpExecArray | null;
+    while ((timestampMatch = TIMESTAMP_REGEX.exec(text)) !== null) {
+      const fullStart = from + timestampMatch.index;
+      const fullEnd = fullStart + timestampMatch[0].length;
+      const hours = timestampMatch[1] ? parseInt(timestampMatch[1], 10) : 0;
+      const minutes = parseInt(timestampMatch[2], 10);
+      const seconds = parseInt(timestampMatch[3], 10);
+      const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+      entries.push({ from: fullStart, to: fullEnd, decoration: timestampMarkFor(totalSeconds) });
     }
 
     // --- IMAGEM (![alt](caminho)§size:N§shape:tipo) — sempre widget, nunca sintaxe bruta ---
@@ -1354,10 +1661,12 @@ function selectionTouches(state: EditorState, from: number, to: number): boolean
 // se isso não for respeitado.
 function buildCodeBlockDecorations(state: EditorState): DecorationSet {
   const entries: { from: number; to: number; decoration: Decoration }[] = [];
+  const fencedRanges: { from: number; to: number }[] = [];
 
   syntaxTree(state).iterate({
     enter(node) {
       if (node.name !== "FencedCode") return;
+      fencedRanges.push({ from: node.from, to: node.to });
 
       // Bloco com o cursor dentro continua cru (crases visíveis) — mesmo padrão
       // de negrito/itálico/heading (cursorTouches), diferente de callouts/
@@ -1383,6 +1692,24 @@ function buildCodeBlockDecorations(state: EditorState): DecorationSet {
       entries.push({ from: node.from, to: node.to, decoration: Decoration.replace({ widget, block: true }) });
     },
   });
+
+  // Embed de vídeo (YouTube/Vimeo) — ver parseVideoEmbedUrl em videoEmbed.ts.
+  // Varre linha por linha (não dá pra usar a árvore de sintaxe: uma URL solta
+  // não vira nenhum nó especial no parser de markdown), pulando linhas dentro
+  // de um bloco de código (senão uma URL colada ali também viraria embed).
+  for (let lineNo = 1; lineNo <= state.doc.lines; lineNo++) {
+    const line = state.doc.line(lineNo);
+    if (fencedRanges.some((r) => line.from >= r.from && line.from <= r.to)) continue;
+    const embed = parseVideoEmbedUrl(line.text);
+    if (!embed) continue;
+    // Mesmo padrão de FencedCode: linha com o cursor continua crua/editável.
+    if (selectionTouches(state, line.from, line.to)) continue;
+    entries.push({
+      from: line.from,
+      to: line.to,
+      decoration: Decoration.replace({ widget: new VideoEmbedWidget(embed.embedUrl, embed.provider, line.from), block: true }),
+    });
+  }
 
   entries.sort((a, b) => a.from - b.from || a.to - b.to);
   const builder = new RangeSetBuilder<Decoration>();

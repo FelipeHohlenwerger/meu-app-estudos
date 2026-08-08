@@ -15,6 +15,12 @@
   --text-muted: #8a7f6c;
   --radius: 8px;
   --accent: #d4af6a;
+  /* Cor de link de conteúdo (wiki-link, timestamp de vídeo etc.) — cor de
+     conteúdo/marca, não de superfície, então fixa (não varia por tema, mesmo
+     espírito das paletas de highlight/callout abaixo). Distinta de --accent
+     (usada em hover de botão/card) e do âmbar de H1 (ver colors.ts). */
+  --link-color: #5b9dd9;
+  --link-color-hover: #8ec2ee;
   /* Gradiente decorativo no topo da Homepage — ver LibraryHome.tsx */
   --gradient-top: #26221d;
 }
@@ -83,4 +89,59 @@ body {
 .toolbar-link:hover {
   color: var(--accent);
   background-color: var(--panel-hover);
+}
+
+/* Links de conteúdo dentro da nota: wiki-link válido e suas variantes
+   (página/capítulo/bloco de PDF-EPUB), nota de rodapé, e timestamp de vídeo
+   (ver videoTimestampClickHandler em livePreview.ts) — todos compartilham o
+   mesmo estilo/hover, cor vem de --link-color (não --accent, que é usada só
+   em hover de botão/card). Link quebrado (.wiki-link-broken e equivalentes)
+   fica de fora de propósito — é um estado de aviso, não um link válido. */
+.wiki-link,
+.wiki-page-link,
+.wiki-chapter-link,
+.wiki-block-link,
+.footnote-ref,
+.video-timestamp {
+  color: var(--link-color);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  cursor: pointer;
+  transition: color 0.12s ease, text-decoration-thickness 0.12s ease;
+}
+.wiki-link:hover,
+.wiki-page-link:hover,
+.wiki-chapter-link:hover,
+.wiki-block-link:hover,
+.footnote-ref:hover,
+.video-timestamp:hover {
+  color: var(--link-color-hover);
+  text-decoration-thickness: 2px;
+}
+/* O texto de "[[nota]]" fica dentro de um span ANINHADO gerado pelo
+   destaque de sintaxe do CodeMirror (tags.link, ver customHighlightStyle em
+   NotePanel.tsx) com sua própria cor explícita — sem forçar aqui, passar o
+   mouse mudaria só a cor do span de fora (invisível, coberto pelo de dentro).
+   !important pra vencer a especificidade da classe gerada pelo CodeMirror. */
+.wiki-link:hover *,
+.wiki-page-link:hover *,
+.wiki-chapter-link:hover *,
+.wiki-block-link:hover *,
+.footnote-ref:hover *,
+.video-timestamp:hover * {
+  color: var(--link-color-hover) !important;
+}
+
+/* Link quebrado (nota não existe): mesmo problema do span aninhado acima,
+   mas aqui é regressão de verdade — sem isso o texto ficava azul (cor de
+   link válido) por cima do sublinhado ondulado vermelho de aviso, escondendo
+   o principal sinal visual de "essa nota não existe". Cor igual ao style
+   inline de brokenWikiLinkMarkFor/brokenWikiPageLinkMarkFor/etc. em
+   livePreview.ts (mantida como literal ali, sem variável própria — segue o
+   mesmo padrão). */
+.wiki-link-broken *,
+.wiki-page-link-broken *,
+.wiki-chapter-link-broken *,
+.wiki-block-link-broken * {
+  color: #d04444 !important;
 }

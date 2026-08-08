@@ -9,6 +9,7 @@ import {
   getNoteTags,
   reindexNote,
   removeNoteFromIndex,
+  touchActivity,
 } from "@/lib/vaultIndex";
 import { getVaultById } from "@/lib/vaultRegistry";
 
@@ -53,6 +54,7 @@ export async function GET(request: NextRequest) {
       tags,
       status: statusInfo?.status,
       contentType: statusInfo?.contentType,
+      isFavorite: statusInfo?.isFavorite ?? false,
     });
   } catch (error) {
     return NextResponse.json(
@@ -88,6 +90,7 @@ export async function POST(request: NextRequest) {
     ensureIndexFresh(vaultId);
     const stats = await stat(filePath);
     reindexNote(vaultId, path.basename(filePath), content, stats.mtimeMs);
+    touchActivity(vaultId, path.basename(filePath));
 
     return NextResponse.json({ success: true });
   } catch (error) {
