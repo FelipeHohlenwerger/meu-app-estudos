@@ -63,6 +63,22 @@ export function buildTagTree(tagCounts: [string, number][]): TagTreeNode[] {
   return toSortedNodes(root);
 }
 
+// Formata uma tag pra EXIBIÇÃO — nunca usado pro dado salvo/filtro/navegação,
+// que continuam usando a string crua (minúscula, com "."). Ponto vira espaço
+// e cada segmento (e cada palavra dentro dele, se houver espaço) ganha a
+// primeira letra maiúscula: "história.antiga" → "História Antiga".
+export function formatTagLabel(tag: string): string {
+  return tag
+    .split(".")
+    .map((segment) =>
+      segment
+        .split(" ")
+        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+        .join(" ")
+    )
+    .join(" ");
+}
+
 // Filtra a árvore por busca textual (nome do segmento OU caminho completo) —
 // um nó sobrevive se ele mesmo bate OU se qualquer descendente bate (senão
 // digitar o nome de uma sub-tag faria o pai sumir e a sub-tag junto).

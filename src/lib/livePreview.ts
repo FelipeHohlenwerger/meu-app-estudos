@@ -10,8 +10,10 @@ import {
   DEFAULT_IMAGE_SIZE,
   DEFAULT_IMAGE_SHAPE,
   DEFAULT_IMAGE_ALIGN,
+  DEFAULT_IMAGE_WRAP,
   type ImageShape,
   type ImageAlign,
+  type ImageWrap,
 } from "@/lib/imageSyntax";
 import { highlightColors, underlineColors, calloutColors, HEADING_COLORS } from "@/lib/colors";
 import { CodeBlockWidget, MermaidWidget } from "@/lib/codeBlockWidget";
@@ -515,11 +517,14 @@ class CheckboxWidget extends WidgetType {
   }
 }
 
-// Imagem inserida na nota ("![alt](caminho)§size:N§shape:tipo") — sempre
-// renderizada (não alterna com a sintaxe bruta como highlight/comentário, já
-// que não faz sentido editar uma imagem caractere por caractere). Clique
-// dispara "image-click" em view.dom (mesmo padrão de HighlightIconWidget),
-// pra abrir o painel de tamanho/recorte em page.tsx.
+// Imagem inserida na nota ("![alt](caminho)§size:N§shape:tipo§wrap:tipo") —
+// sempre renderizada (não alterna com a sintaxe bruta como highlight/
+// comentário, já que não faz sentido editar uma imagem caractere por
+// caractere). Clique dispara "image-click" em view.dom (mesmo padrão de
+// HighlightIconWidget), pra abrir o painel de tamanho/recorte em page.tsx —
+// agora um popup flutuante ancorado na própria imagem, não mais fixo no topo
+// da nota (ver NotePanel.tsx), por isso o detail do evento inclui a posição
+// na tela de onde o clique partiu.
 class ImageWidget extends WidgetType {
   constructor(
     private alt: string,
@@ -527,6 +532,7 @@ class ImageWidget extends WidgetType {
     private size: number,
     private shape: ImageShape,
     private align: ImageAlign,
+    private wrap: ImageWrap,
     private from: number,
     private to: number,
     private selected: boolean
@@ -541,6 +547,7 @@ class ImageWidget extends WidgetType {
       other.size === this.size &&
       other.shape === this.shape &&
       other.align === this.align &&
+      other.wrap === this.wrap &&
       other.from === this.from &&
       other.to === this.to &&
       other.selected === this.selected
@@ -558,8 +565,20 @@ class ImageWidget extends WidgetType {
     wrapper.style.display = "block";
     wrapper.style.width = `${this.size}%`;
     wrapper.style.maxWidth = "100%";
-    wrapper.style.marginLeft = this.align === "left" ? "0" : "auto";
-    wrapper.style.marginRight = this.align === "right" ? "0" : "auto";
+    if (this.wrap === "none") {
+      wrapper.style.marginLeft = this.align === "left" ? "0" : "auto";
+      wrapper.style.marginRight = this.align === "right" ? "0" : "auto";
+    } else {
+      // "wrap" é nomeado pela perspectiva do TEXTO (ver ImageWrap em
+      // imageSyntax.ts) — "right" (texto à direita) floata a imagem à
+      // esquerda, "left" (texto à esquerda) floata à direita. Margem fixa dos
+      // dois lados (não tenta acompanhar contorno circular/oval — sem
+      // shape-outside de propósito, ver plano).
+      wrapper.style.float = this.wrap === "right" ? "left" : "right";
+      wrapper.style.marginLeft = this.wrap === "right" ? "0" : "1rem";
+      wrapper.style.marginRight = this.wrap === "right" ? "1rem" : "0";
+      wrapper.style.marginBottom = "0.5rem";
+    }
     if (this.selected) {
       wrapper.style.outline = "2px solid var(--accent)";
       wrapper.style.outlineOffset = "2px";
@@ -595,6 +614,7 @@ class ImageWidget extends WidgetType {
     wrapper.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const rect = wrapper.getBoundingClientRect();
       view.dom.dispatchEvent(
         new CustomEvent("image-click", {
           detail: {
@@ -603,8 +623,13 @@ class ImageWidget extends WidgetType {
             size: this.size,
             shape: this.shape,
             align: this.align,
+            wrap: this.wrap,
             from: this.from,
             to: this.to,
+            // Ancora o popup flutuante de controles logo abaixo da imagem,
+            // não mais fixo no topo da nota (ver NotePanel.tsx) — mesmo
+            // offset de 6px já usado pelos outros popups ancorados do app.
+            anchor: { x: rect.left, y: rect.bottom + 6 },
           },
           bubbles: true,
         })
@@ -1467,7 +1492,7 @@ function buildDecorations(view: EditorView): DecorationSet {
       entries.push({ from: fullStart, to: fullEnd, decoration: timestampMarkFor(totalSeconds) });
     }
 
-    // --- IMAGEM (![alt](caminho)§size:N§shape:tipo) — sempre widget, nunca sintaxe bruta ---
+    // --- IMAGEM (![alt](caminho)§size:N§shape:tipo§wrap:tipo) — sempre widget, nunca sintaxe bruta ---
     IMAGE_REGEX.lastIndex = 0;
     let imageMatch: RegExpExecArray | null;
     while ((imageMatch = IMAGE_REGEX.exec(text)) !== null) {
@@ -1478,9 +1503,10 @@ function buildDecorations(view: EditorView): DecorationSet {
       const size = imageMatch[3] ? parseInt(imageMatch[3], 10) : DEFAULT_IMAGE_SIZE;
       const shape = (imageMatch[4] as ImageShape) || DEFAULT_IMAGE_SHAPE;
       const align = (imageMatch[5] as ImageAlign) || DEFAULT_IMAGE_ALIGN;
+      const wrap = (imageMatch[6] as ImageWrap) || DEFAULT_IMAGE_WRAP;
       const selectedImage = view.state.field(selectedImageField, false);
       const selected = selectedImage?.from === fullStart && selectedImage?.to === fullEnd;
-      const widget = new ImageWidget(alt, srcPath, size, shape, align, fullStart, fullEnd, selected);
+      const widget = new ImageWidget(alt, srcPath, size, shape, align, wrap, fullStart, fullEnd, selected);
       entries.push({ from: fullStart, to: fullEnd, decoration: Decoration.replace({ widget }) });
     }
 

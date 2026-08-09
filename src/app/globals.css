@@ -21,6 +21,13 @@
      (usada em hover de botão/card) e do âmbar de H1 (ver colors.ts). */
   --link-color: #5b9dd9;
   --link-color-hover: #8ec2ee;
+  /* Cor de link de tema/tag (nome de macro-tema, "Favoritos", "Editados
+     recentemente" na Homepage) — mesmo âmbar já usado em HEADING_COLORS[0]
+     (colors.ts, cor do H1 dentro do corpo da nota), não uma cor nova; também
+     fixa, mesmo espírito de --link-color acima. Distinta de propósito do
+     --link-color azul (esse é o link [[nota]]/timestamp, não tema). */
+  --tag-link-color: #c99a5b;
+  --tag-link-color-hover: #ddb37e;
   /* Gradiente decorativo no topo da Homepage — ver LibraryHome.tsx */
   --gradient-top: #26221d;
 }
@@ -130,6 +137,22 @@ body {
 .footnote-ref:hover *,
 .video-timestamp:hover * {
   color: var(--link-color-hover) !important;
+}
+
+/* Nome de tema/tag clicável na Homepage (macro-tema, "Favoritos", "Editados
+   recentemente") — cor âmbar própria (--tag-link-color, mesmo tom do H1 do
+   corpo da nota), distinta do azul de .wiki-link acima. Sem sublinhado em
+   repouso (título "limpo"); sublinha só no hover, junto do clareamento —
+   elemento React puro (sem span aninhado do CodeMirror), então não precisa
+   do "!important"/seletor-filho que .wiki-link usa acima. */
+.tag-link {
+  color: var(--tag-link-color);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.tag-link:hover {
+  color: var(--tag-link-color-hover);
+  text-decoration: underline;
 }
 
 /* Link quebrado (nota não existe): mesmo problema do span aninhado acima,

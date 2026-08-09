@@ -50,8 +50,10 @@ import {
   DEFAULT_IMAGE_SIZE,
   DEFAULT_IMAGE_SHAPE,
   DEFAULT_IMAGE_ALIGN,
+  DEFAULT_IMAGE_WRAP,
   type ImageShape,
   type ImageAlign,
+  type ImageWrap,
 } from "@/lib/imageSyntax";
 import { extractHighlightEntries, generateHighlightsPdf } from "@/lib/exportHighlights";
 import { requestAiAction, type AiAction } from "@/lib/aiActions";
@@ -342,8 +344,13 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     size: number;
     shape: ImageShape;
     align: ImageAlign;
+    wrap: ImageWrap;
     from: number;
     to: number;
+    // Posição na tela (calculada a partir da própria imagem clicada, ver
+    // ImageWidget em livePreview.ts) — ancora o popup flutuante de controles
+    // logo abaixo dela, em vez de fixo no topo da nota.
+    anchor: { x: number; y: number };
   } | null>(null);
 
   const editorViewRef = useRef<EditorView | null>(null);
@@ -538,8 +545,10 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         size: number;
         shape: ImageShape;
         align: ImageAlign;
+        wrap: ImageWrap;
         from: number;
         to: number;
+        anchor: { x: number; y: number };
       };
       const view = editorViewRef.current;
       if (!view) return;
@@ -859,7 +868,14 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         return;
       }
 
-      const finalSyntax = buildImageSyntax(file.name, data.path, DEFAULT_IMAGE_SIZE, DEFAULT_IMAGE_SHAPE, DEFAULT_IMAGE_ALIGN);
+      const finalSyntax = buildImageSyntax(
+        file.name,
+        data.path,
+        DEFAULT_IMAGE_SIZE,
+        DEFAULT_IMAGE_SHAPE,
+        DEFAULT_IMAGE_ALIGN,
+        DEFAULT_IMAGE_WRAP
+      );
       view.dispatch({ changes: { from: pos, to: pos + placeholder.length, insert: finalSyntax } });
     } catch {
       const currentText = view.state.doc.toString();
@@ -877,7 +893,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   function handleImageSizeChange(size: number) {
     const view = editorViewRef.current;
     if (!view || !selectedImage) return;
-    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, size, selectedImage.shape, selectedImage.align);
+    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, size, selectedImage.shape, selectedImage.align, selectedImage.wrap);
     const newTo = selectedImage.from + newSyntax.length;
     view.dispatch({
       changes: { from: selectedImage.from, to: selectedImage.to, insert: newSyntax },
@@ -889,7 +905,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   function handleImageShapeChange(shape: ImageShape) {
     const view = editorViewRef.current;
     if (!view || !selectedImage) return;
-    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, selectedImage.size, shape, selectedImage.align);
+    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, selectedImage.size, shape, selectedImage.align, selectedImage.wrap);
     const newTo = selectedImage.from + newSyntax.length;
     view.dispatch({
       changes: { from: selectedImage.from, to: selectedImage.to, insert: newSyntax },
@@ -901,13 +917,25 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   function handleImageAlignChange(align: ImageAlign) {
     const view = editorViewRef.current;
     if (!view || !selectedImage) return;
-    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, selectedImage.size, selectedImage.shape, align);
+    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, selectedImage.size, selectedImage.shape, align, selectedImage.wrap);
     const newTo = selectedImage.from + newSyntax.length;
     view.dispatch({
       changes: { from: selectedImage.from, to: selectedImage.to, insert: newSyntax },
       effects: setSelectedImageEffect.of({ from: selectedImage.from, to: newTo }),
     });
     setSelectedImage({ ...selectedImage, align, to: newTo });
+  }
+
+  function handleImageWrapChange(wrap: ImageWrap) {
+    const view = editorViewRef.current;
+    if (!view || !selectedImage) return;
+    const newSyntax = buildImageSyntax(selectedImage.alt, selectedImage.path, selectedImage.size, selectedImage.shape, selectedImage.align, wrap);
+    const newTo = selectedImage.from + newSyntax.length;
+    view.dispatch({
+      changes: { from: selectedImage.from, to: selectedImage.to, insert: newSyntax },
+      effects: setSelectedImageEffect.of({ from: selectedImage.from, to: newTo }),
+    });
+    setSelectedImage({ ...selectedImage, wrap, to: newTo });
   }
 
   async function convertMention(mention: { filename: string; from: number; to: number; matchedText: string }) {
@@ -1652,7 +1680,9 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       ⋯
                     </button>
                   )}
-                  <StatusDropdown status={studyStatus} contentType={contentType} onChange={handleStatusChange} />
+                  {contentType !== "book" && (
+                    <StatusDropdown status={studyStatus} contentType={contentType} onChange={handleStatusChange} />
+                  )}
                   {closable && (
                     <button
                       onClick={onClose}
@@ -1673,18 +1703,6 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
               </>
             )}
 
-            {!isMobile && filename && !viewerKind && selectedImage && (
-              <ImageControlPanel
-                image={{
-                  size: selectedImage.size,
-                  shape: selectedImage.shape,
-                  align: selectedImage.align,
-                  onSizeChange: handleImageSizeChange,
-                  onShapeChange: handleImageShapeChange,
-                  onAlignChange: handleImageAlignChange,
-                }}
-              />
-            )}
           </div>
 
           {!filename && (
@@ -1960,6 +1978,30 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         />
       )}
 
+      {/* Painel de controles de imagem: flutuante, ancorado na própria imagem
+          selecionada (posição vem do próprio clique, ver ImageWidget em
+          livePreview.ts) — não mais fixo no topo da nota, que obrigava rolar
+          até lá pra ajustar uma imagem no meio de um texto longo. Só desktop
+          — no mobile a mesma função já vive na folha "Mais opções" (abaixo),
+          que não tem esse problema (é aberta sob demanda, não fica fixa). */}
+      {!isMobile && selectedImage && (
+        <ImageControlPanel
+          x={selectedImage.anchor.x}
+          y={selectedImage.anchor.y}
+          onClose={() => setSelectedImage(null)}
+          image={{
+            size: selectedImage.size,
+            shape: selectedImage.shape,
+            align: selectedImage.align,
+            wrap: selectedImage.wrap,
+            onSizeChange: handleImageSizeChange,
+            onShapeChange: handleImageShapeChange,
+            onAlignChange: handleImageAlignChange,
+            onWrapChange: handleImageWrapChange,
+          }}
+        />
+      )}
+
       {commentDraft && (
         <CommentModal tipo={commentDraft.tipo} initialText={commentDraft.initialText} onConfirm={confirmComment} onCancel={() => setCommentDraft(null)} />
       )}
@@ -2119,9 +2161,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                     size: selectedImage.size,
                     shape: selectedImage.shape,
                     align: selectedImage.align,
+                    wrap: selectedImage.wrap,
                     onSizeChange: handleImageSizeChange,
                     onShapeChange: handleImageShapeChange,
                     onAlignChange: handleImageAlignChange,
+                    onWrapChange: handleImageWrapChange,
                   }}
                 />
               </div>

@@ -4,11 +4,12 @@ import path from "path";
 import { extractLinkTargets, findBlockMarkers } from "@/lib/wikiLinkSyntax";
 import { getVaultById } from "@/lib/vaultRegistry";
 import { contentTypeFor, defaultStatusFor, statusOrderFor, type ContentType } from "@/lib/noteStatus";
+import { IMAGE_REGEX } from "@/lib/imageSyntax";
 
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
 // verdade) — a migração força um reprocessamento completo quando a versão sobe.
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 // Caminho da pasta de UM vault, resolvido pelo registro — nunca mais uma
 // constante fixa (ver src/lib/vaultRegistry.ts). Lança se o id não existir no
@@ -58,6 +59,13 @@ const SUMMARY_MAX_LENGTH = 80;
 
 function cleanSummaryLine(line: string): string {
   return line
+    // Sintaxe interna de imagem (![alt](caminho)§size:...§shape:...§align:...
+    // §wrap:...) nunca deve virar "texto" do resumo — some inteira daqui,
+    // não vira alt text (diferente do wikilink logo abaixo, que vira o
+    // título). Uma linha que é SÓ a imagem some por completo, e o loop em
+    // extractSummary já pula linha vazia — vai pra próxima linha com texto
+    // real sozinho, sem lógica extra.
+    .replace(IMAGE_REGEX, "")
     .replace(/==(.+?)==§\w+(?::sub)?/g, "$1")
     .replace(/~(.+?)~¶\w+\{[^}]*\}/g, "$1")
     .replace(/!?\[\[([^\]]+)\]\]/g, (_m, inner: string) => inner.split("#^")[0].trim())

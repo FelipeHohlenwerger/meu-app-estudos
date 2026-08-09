@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
 import { STATUS_COLORS } from "@/lib/colors";
-import { STATUS_LABELS, BOOK_STATUS_ORDER, NOTE_STATUS_ORDER } from "@/lib/noteStatus";
+import { STATUS_LABELS, NOTE_STATUS_ORDER } from "@/lib/noteStatus";
 import { formatRelativeTime } from "@/lib/relativeTime";
+import { formatTagLabel } from "@/lib/tagTree";
 
 type Props = {
   notes: LibraryNote[];
@@ -12,7 +13,10 @@ type Props = {
   onRenameNote: (filename: string) => void;
   onDeleteNote: (filename: string) => void;
   onViewTag: (tag: string | null) => void;
-  onViewAllNotes: () => void;
+  // Só o nome do macro-tema é clicável (ver seção de temas mais abaixo) — vai
+  // pra página de foco (TagFocusPage), diferente de onViewTag(null), que
+  // continua indo pra lista plana "Sem categoria".
+  onViewTagFocus: (macroTag: string) => void;
   onViewStatus: (status: string) => void;
   onViewRecent: () => void;
   onViewFavorites: () => void;
@@ -107,6 +111,14 @@ function EmptyStateActionButton({
 
 const serifStyle = { fontFamily: "var(--font-fraunces)" };
 
+// Largura fixa de cada card em toda grade de cards da Homepage — nunca
+// "1fr"/"repeat(N, 1fr)", que estica o card pra dividir o espaço disponível
+// (bug real: com poucos itens ou tela larga, o card fica muito maior que o
+// tamanho pretendido). Cards sempre com essa largura, quebrando linha
+// normalmente, sobra de espaço vazio é esperado e correto.
+const CARD_ROW_MIN_WIDTH = 220;
+const CARD_ROW_GAP = 16; // 1rem
+
 function SectionGrid({
   notes,
   onOpenNote,
@@ -128,7 +140,7 @@ function SectionGrid({
   const remaining = notes.length - visibleNotes.length;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem" }}>
+    <div style={{ display: "grid", gridTemplateColumns: `repeat(4, ${CARD_ROW_MIN_WIDTH}px)`, gap: "1rem" }}>
       {visibleNotes.map((note) => (
         <NoteCard
           key={note.filename}
@@ -162,31 +174,25 @@ function SectionGrid({
   );
 }
 
-// Largura mínima de cada card nas linhas "preenche a largura disponível"
-// (Favoritas, Editados recentemente) — mesma ordem de grandeza dos cards nas
-// seções por tema (essas usam um grid fixo de 4 colunas, sem largura em px
-// declarada em lugar nenhum do projeto; este valor é só uma estimativa
-// razoável validada visualmente).
-const CARD_ROW_MIN_WIDTH = 220;
-const CARD_ROW_GAP = 16; // 1rem
-
 // Linha de cards que preenche a largura disponível (quantos couberem, sem
 // quebrar linha nem rolar) em vez do grid fixo de 4 colunas do SectionGrid —
 // por isso não reaproveita SectionGrid: são dois algoritmos de layout
 // diferentes o bastante pra não valer a pena forçar um componente só a fazer
 // as duas coisas. Mede a própria largura via ResizeObserver (o container da
 // Homepage não tem max-width, então isso genuinamente varia com a janela).
-// Reaproveitada tanto por "Favoritas" quanto por "Editados recentemente" —
+// Reaproveitada tanto por "Favoritos" quanto por "Editados recentemente" —
 // só muda a lista de notas (já ordenada por quem chama) e o texto de meta
 // (getMeta, opcional — sem ele cada NoteCard mostra o padrão status/tempo de
-// leitura).
+// leitura). Sem card de "Mostrar todos": a lista completa já é acessível
+// clicando no título da seção (ver LibraryHome), então cada linha mostra o
+// máximo de cards reais que couberem no espaço, sem "gastar" um slot com um
+// card de overflow.
 function CardRow({
   notes,
   getMeta,
   onOpenNote,
   onRenameNote,
   onDeleteNote,
-  onViewMore,
   onToggleFavorite,
 }: {
   notes: LibraryNote[];
@@ -194,7 +200,6 @@ function CardRow({
   onOpenNote: (filename: string) => void;
   onRenameNote: (filename: string) => void;
   onDeleteNote: (filename: string) => void;
-  onViewMore: () => void;
   onToggleFavorite: (filename: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -214,17 +219,14 @@ function CardRow({
   // Antes de medir (primeiro render), assume 4 — mesmo padrão das outras
   // seções, evita um "pulo" grande assim que o ResizeObserver reporta.
   const fittable = containerWidth > 0 ? Math.max(1, Math.floor((containerWidth + CARD_ROW_GAP) / perCardWidth)) : 4;
-  const showMoreCard = notes.length > fittable;
-  const visibleNotes = showMoreCard ? notes.slice(0, Math.max(1, fittable - 1)) : notes.slice(0, fittable);
-  const remaining = notes.length - visibleNotes.length;
-  const columnCount = visibleNotes.length + (showMoreCard ? 1 : 0);
+  const visibleNotes = notes.slice(0, fittable);
 
   return (
     <div
       ref={containerRef}
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${Math.max(columnCount, 1)}, ${CARD_ROW_MIN_WIDTH}px)`,
+        gridTemplateColumns: `repeat(${Math.max(visibleNotes.length, 1)}, ${CARD_ROW_MIN_WIDTH}px)`,
         gap: `${CARD_ROW_GAP}px`,
       }}
     >
@@ -240,24 +242,6 @@ function CardRow({
           onToggleFavorite={() => onToggleFavorite(note.filename)}
         />
       ))}
-      {showMoreCard && (
-        <div
-          onClick={onViewMore}
-          style={{
-            border: "1px solid var(--panel-border)",
-            borderRadius: "var(--radius)",
-            padding: "1rem",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#2f7fd6",
-            fontWeight: "bold",
-          }}
-        >
-          Mostrar todos ({remaining > 0 ? `+${remaining}` : notes.length})
-        </div>
-      )}
     </div>
   );
 }
@@ -300,7 +284,7 @@ export default function LibraryHome({
   onRenameNote,
   onDeleteNote,
   onViewTag,
-  onViewAllNotes,
+  onViewTagFocus,
   onViewStatus,
   onViewRecent,
   onViewFavorites,
@@ -314,13 +298,24 @@ export default function LibraryHome({
 }: Props) {
   const [dragActive, setDragActive] = useState(false);
 
-  const tagCounts = new Map<string, number>();
+  // Agrupado por MACRO-tema (primeiro segmento antes do "."), não por tag
+  // exata — "história", "história.antiga" e "história.pré-história" viram
+  // uma seção só ("história"), somando as notas dos subtemas junto. Uma nota
+  // só conta uma vez por macro-tema mesmo se tiver mais de uma tag sob o
+  // mesmo macro (Set por nota); se tiver tags em macro-temas diferentes,
+  // aparece em cada seção correspondente — mesmo espírito de antes pra tags
+  // distintas. Detalhe por subtema fica na página de foco (TagFocusPage),
+  // acessível só clicando no nome da seção.
+  const macroTagMap = new Map<string, LibraryNote[]>();
   for (const note of notes) {
-    for (const tag of note.tags) {
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+    const macros = new Set(note.tags.map((t) => t.split(".")[0]));
+    for (const macro of macros) {
+      const list = macroTagMap.get(macro) ?? [];
+      list.push(note);
+      macroTagMap.set(macro, list);
     }
   }
-  const sortedTags = Array.from(tagCounts.entries()).sort((a, b) => b[1] - a[1]);
+  const sortedMacroTags = Array.from(macroTagMap.entries()).sort((a, b) => b[1].length - a[1].length);
   const untaggedNotes = notes.filter((n) => n.tags.length === 0);
 
   const statusCounts = new Map<string, number>();
@@ -388,37 +383,14 @@ export default function LibraryHome({
         </div>
       ) : (
       <>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <h1 style={{ ...serifStyle, fontSize: "2.4em", margin: 0 }}>Sua biblioteca</h1>
-        <button
-          onClick={onViewAllNotes}
-          className="toolbar-link"
-          style={{ padding: "0.4rem 0.8rem", border: "1px solid var(--panel-border)", borderRadius: "4px", cursor: "pointer" }}
-        >
-          Todas as notas
-        </button>
-      </div>
+      <h1 style={{ ...serifStyle, fontSize: "2.4em", margin: 0 }}>Sua biblioteca</h1>
       <p style={{ color: "var(--text-muted)", marginTop: "0.4rem" }}>
-        {notes.length} {notes.length === 1 ? "nota" : "notas"} em {sortedTags.length}{" "}
-        {sortedTags.length === 1 ? "tema" : "temas"}
+        {notes.length} {notes.length === 1 ? "nota" : "notas"} em {sortedMacroTags.length}{" "}
+        {sortedMacroTags.length === 1 ? "tema" : "temas"}
       </p>
 
       <section style={sectionDividerStyle}>
         <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Progresso</h2>
-
-        <div style={{ marginBottom: "1.2rem" }}>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Livros</div>
-          <div style={{ display: "flex", gap: "2.5rem", flexWrap: "wrap" }}>
-            {BOOK_STATUS_ORDER.map((status) => (
-              <StatusCounter
-                key={status}
-                status={status}
-                count={statusCounts.get(status) ?? 0}
-                onClick={() => onViewStatus(status)}
-              />
-            ))}
-          </div>
-        </div>
 
         <div>
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Notas</div>
@@ -435,49 +407,84 @@ export default function LibraryHome({
         </div>
       </section>
 
-      {favoriteNotes.length > 0 && (
-        <section style={sectionDividerStyle}>
-          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Favoritas</h2>
-          <CardRow
-            notes={favoriteNotes}
-            onOpenNote={onOpenNote}
-            onRenameNote={onRenameNote}
-            onDeleteNote={onDeleteNote}
-            onViewMore={onViewFavorites}
-            onToggleFavorite={onToggleFavorite}
-          />
-        </section>
-      )}
-
+      {/* Favoritos + Editados recentemente lado a lado (cada metade da
+          largura) — sem Favoritos (nenhuma nota favoritada), a única coluna
+          (Editados) ocupa a largura inteira sozinha via flex:1, sem CSS
+          extra. Os dois títulos agora são clicáveis (mesmo tratamento visual
+          âmbar do nome de tema, classe .tag-link em globals.css). */}
       {recentNotes.length > 0 && (
         <section style={sectionDividerStyle}>
-          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Editados recentemente</h2>
-          <CardRow
-            notes={recentNotes}
-            getMeta={(note) => formatRelativeTime(note.lastActivityMs)}
-            onOpenNote={onOpenNote}
-            onRenameNote={onRenameNote}
-            onDeleteNote={onDeleteNote}
-            onViewMore={onViewRecent}
-            onToggleFavorite={onToggleFavorite}
-          />
+          <div style={{ display: "flex", gap: "2rem" }}>
+            {favoriteNotes.length > 0 && (
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h2
+                  className="tag-link"
+                  onClick={onViewFavorites}
+                  style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}
+                >
+                  Favoritos
+                </h2>
+                <CardRow
+                  notes={favoriteNotes}
+                  onOpenNote={onOpenNote}
+                  onRenameNote={onRenameNote}
+                  onDeleteNote={onDeleteNote}
+                  onToggleFavorite={onToggleFavorite}
+                />
+              </div>
+            )}
+            {/* Divisória entre as duas colunas — só faz sentido com as duas
+                presentes; sem Favoritos, Editados fica sozinho, sem linha
+                sobrando do lado. Mesmo padrão visual do divisor entre painéis
+                no modo Dividir Tela (page.tsx). */}
+            {favoriteNotes.length > 0 && <div style={{ width: "1px", flexShrink: 0, background: "var(--panel-border)" }} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h2
+                className="tag-link"
+                onClick={onViewRecent}
+                style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}
+              >
+                Editados recentemente
+              </h2>
+              <CardRow
+                notes={recentNotes}
+                getMeta={(note) => formatRelativeTime(note.lastActivityMs)}
+                onOpenNote={onOpenNote}
+                onRenameNote={onRenameNote}
+                onDeleteNote={onDeleteNote}
+                onToggleFavorite={onToggleFavorite}
+              />
+            </div>
+          </div>
         </section>
       )}
 
-      {sortedTags.map(([tag, count]) => (
-        <section key={tag} style={sectionDividerStyle}>
+      {sortedMacroTags.map(([macro, macroNotes]) => (
+        <section key={macro} style={sectionDividerStyle}>
           <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
-            {tag}{" "}
+            {/* Só o nome do tema é clicável (vai pra página de foco) — os
+                cards de nota abaixo continuam abrindo a nota normalmente. */}
+            <span
+              className="tag-link"
+              onClick={() => onViewTagFocus(macro)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onViewTagFocus(macro);
+              }}
+            >
+              {formatTagLabel(macro)}
+            </span>{" "}
             <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
-              ({count} {count === 1 ? "nota" : "notas"})
+              ({macroNotes.length} {macroNotes.length === 1 ? "nota" : "notas"})
             </span>
           </h2>
           <SectionGrid
-            notes={notes.filter((n) => n.tags.includes(tag))}
+            notes={macroNotes}
             onOpenNote={onOpenNote}
             onRenameNote={onRenameNote}
             onDeleteNote={onDeleteNote}
-            onViewMore={() => onViewTag(tag)}
+            onViewMore={() => onViewTagFocus(macro)}
             onToggleFavorite={onToggleFavorite}
           />
         </section>

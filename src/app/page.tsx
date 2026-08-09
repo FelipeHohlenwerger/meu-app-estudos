@@ -4,15 +4,17 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import GraphView, { type GraphNode, type GraphEdge } from "@/components/GraphView";
 import LibraryHome from "@/components/LibraryHome";
 import TagNoteList from "@/components/TagNoteList";
+import GroupedNoteList from "@/components/GroupedNoteList";
+import TagFocusPage from "@/components/TagFocusPage";
 import { StarIcon, type LibraryNote } from "@/components/NoteCard";
-import { buildTagTree, filterTagTree, type TagTreeNode } from "@/lib/tagTree";
+import { buildTagTree, filterTagTree, formatTagLabel, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
 import NoteRowMenu from "@/components/NoteRowMenu";
 import ConfirmModal from "@/components/ConfirmModal";
 import ImportProgressModal from "@/components/ImportProgressModal";
 import ImportWebModal from "@/components/ImportWebModal";
 import { GRAPH_SPACE_BACKGROUND } from "@/lib/colors";
-import { STATUS_LABELS } from "@/lib/noteStatus";
+import { STATUS_LABELS, matchesTypeFilter, CONTENT_TYPE_FILTER_OPTIONS, type ContentTypeFilter } from "@/lib/noteStatus";
 import NotePanel, { type NotePanelHandle } from "@/components/NotePanel";
 import VaultSwitcher from "@/components/VaultSwitcher";
 import CreateVaultModal from "@/components/CreateVaultModal";
@@ -93,10 +95,23 @@ function MoonIcon() {
   );
 }
 
+// Ícone do botão que revela o filtro por tipo na aba "Tags" da sidebar —
+// mesmo desenho de livro do TypeIcon em NoteCard.tsx (não exportado de lá,
+// então redesenhado aqui, tamanho igual aos outros ícones da toolbar da
+// sidebar).
+function FilterBookIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
+    </svg>
+  );
+}
+
 type HomeView =
   | { kind: "library" }
   | { kind: "tagList"; tag: string | null }
-  | { kind: "allNotes" }
+  | { kind: "tagFocus"; macroTag: string }
   | { kind: "statusList"; status: string }
   | { kind: "recentList" }
   | { kind: "favoritesList" }
@@ -154,6 +169,12 @@ export default function Home() {
   const [sidebarTab, setSidebarTab] = useState<"notes" | "tags">("notes");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
+  // Filtro por tipo da aba "Tags" — escondido por padrão atrás do ícone de
+  // livro ao lado da busca (usado com pouca frequência, mesmo espírito do
+  // "⋯" do painel de imagem); não reseta ao trocar de aba, mesmo espírito de
+  // sidebarSearch.
+  const [sidebarTypeFilter, setSidebarTypeFilter] = useState<ContentTypeFilter>("all");
+  const [showSidebarTypeFilter, setShowSidebarTypeFilter] = useState(false);
   // Chave da ocorrência sendo renomeada na sidebar: "group.key::note.filename",
   // não só o filename — uma nota com várias tags aparece repetida em vários grupos,
   // e se a chave fosse só o filename, TODAS as ocorrências virariam <input
@@ -418,22 +439,29 @@ export default function Home() {
   }, [libraryNotes, sidebarSearch]);
 
   // Aba "Tags" da sidebar: árvore hierárquica (ver src/lib/tagTree.ts — tags
-  // com "." viram níveis, ex: "História.Antiga"), filtrada pela mesma busca.
+  // com "." viram níveis, ex: "História.Antiga"), filtrada pela mesma busca E
+  // pelo filtro de tipo (sidebarTypeFilter). Como buildTagTree só cria nós
+  // pra tags presentes em `counts`, filtrar as notas ANTES de contar já
+  // esconde sozinho qualquer tema/subtema sem nenhum item que bata com o
+  // tipo selecionado — sem precisar de lógica extra de "esconder nó vazio".
   // "Sem tag" fica de fora da árvore (não é uma tag de verdade) e é
   // renderizado como um item plano à parte, sempre por último — mesmo
   // espírito do grupo "Sem tag" que a sidebar já tinha antes das abas.
   const sidebarTagTree = useMemo(() => {
     const counts = new Map<string, number>();
     for (const note of libraryNotes) {
+      if (!matchesTypeFilter(note, sidebarTypeFilter)) continue;
       for (const tag of note.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
     }
     return filterTagTree(buildTagTree(Array.from(counts.entries())), sidebarSearch);
-  }, [libraryNotes, sidebarSearch]);
+  }, [libraryNotes, sidebarSearch, sidebarTypeFilter]);
 
   const sidebarUntaggedNotes = useMemo(() => {
     const q = sidebarSearch.trim().toLowerCase();
-    return libraryNotes.filter((note) => note.tags.length === 0 && (!q || note.title.toLowerCase().includes(q)));
-  }, [libraryNotes, sidebarSearch]);
+    return libraryNotes.filter(
+      (note) => note.tags.length === 0 && matchesTypeFilter(note, sidebarTypeFilter) && (!q || note.title.toLowerCase().includes(q))
+    );
+  }, [libraryNotes, sidebarSearch, sidebarTypeFilter]);
 
   function toggleTheme() {
     setTheme((prev) => {
@@ -921,7 +949,9 @@ export default function Home() {
   // duplicada em cada nível da hierarquia até a raiz).
   function renderTagTreeNode(node: TagTreeNode, depth: number) {
     const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(node.fullPath);
-    const matchingNotes = isExpanded ? libraryNotes.filter((n) => n.tags.includes(node.fullPath)) : [];
+    const matchingNotes = isExpanded
+      ? libraryNotes.filter((n) => n.tags.includes(node.fullPath) && matchesTypeFilter(n, sidebarTypeFilter))
+      : [];
     return (
       <div key={node.fullPath} style={{ marginBottom: "0.25rem" }}>
         <button
@@ -953,7 +983,7 @@ export default function Home() {
             >
               ›
             </span>
-            {node.name}
+            {formatTagLabel(node.name)}
           </span>
           <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{node.totalCount}</span>
         </button>
@@ -1424,24 +1454,6 @@ export default function Home() {
           {theme === "dark" ? <SunIcon /> : <MoonIcon />}
         </button>
 
-        {/* Só aparece dentro do editor — a Homepage já tem seu próprio botão
-            "Todas as notas" (ver LibraryHome), não precisa duplicar aqui.
-            marginLeft: auto separa ele do resto, no canto direito do header. */}
-        {homeView.kind === "editor" && (
-          <button
-            onClick={() => setHomeView({ kind: "allNotes" })}
-            className="toolbar-link"
-            style={{
-              marginLeft: "auto",
-              padding: "0.4rem 0.8rem",
-              border: "1px solid var(--panel-border)",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-          >
-            Todas as notas
-          </button>
-        )}
       </header>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -1453,7 +1465,7 @@ export default function Home() {
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
           onViewTag={(tag) => setHomeView({ kind: "tagList", tag })}
-          onViewAllNotes={() => setHomeView({ kind: "allNotes" })}
+          onViewTagFocus={(macroTag) => setHomeView({ kind: "tagFocus", macroTag })}
           onViewStatus={(status) => setHomeView({ kind: "statusList", status })}
           onViewRecent={() => setHomeView({ kind: "recentList" })}
           onViewFavorites={() => setHomeView({ kind: "favoritesList" })}
@@ -1479,24 +1491,25 @@ export default function Home() {
         />
       )}
 
-      {homeView.kind === "allNotes" && (
-        <TagNoteList
-          tag={null}
-          heading="Todas as notas"
-          notes={libraryNotes}
+      {homeView.kind === "tagFocus" && (
+        <TagFocusPage
+          macroTag={homeView.macroTag}
+          notes={libraryNotes.filter(
+            (n) => n.tags.includes(homeView.macroTag) || n.tags.some((t) => t.startsWith(`${homeView.macroTag}.`))
+          )}
+          onBack={() => setHomeView({ kind: "library" })}
           onOpenNote={openNoteInPanel}
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
-          onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
         />
       )}
 
       {homeView.kind === "statusList" && (
-        <TagNoteList
-          tag={null}
+        <GroupedNoteList
           heading={STATUS_LABELS[homeView.status] ?? homeView.status}
           notes={libraryNotes.filter((n) => n.status === homeView.status)}
+          showTypeFilter
           onOpenNote={openNoteInPanel}
           onRenameNote={handleRenameFromCard}
           onDeleteNote={requestDeleteNote}
@@ -1522,7 +1535,8 @@ export default function Home() {
       {homeView.kind === "favoritesList" && (
         <TagNoteList
           tag={null}
-          heading="Favoritas"
+          heading="Favoritos"
+          showTypeFilter
           notes={[...libraryNotes].filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
           onOpenNote={openNoteInPanel}
           onRenameNote={handleRenameFromCard}
@@ -1634,36 +1648,102 @@ export default function Home() {
           </div>
         </div>
 
-        <div style={{ position: "relative", marginBottom: "1rem" }}>
-          <span
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: sidebarTab === "tags" ? "0.5rem" : "1rem" }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+            <span
+              style={{
+                position: "absolute",
+                left: "0.6rem",
+                top: "50%",
+                transform: "translateY(-50%)",
+                color: "var(--text-muted)",
+                fontSize: "0.85rem",
+                pointerEvents: "none",
+              }}
+            >
+              <SearchIcon />
+            </span>
+            <input
+              value={sidebarSearch}
+              onChange={(e) => setSidebarSearch(e.target.value)}
+              placeholder={sidebarTab === "notes" ? "Buscar notas..." : "Buscar tags..."}
+              style={{
+                width: "100%",
+                padding: "0.4rem 0.5rem 0.4rem 1.8rem",
+                background: "var(--panel-bg)",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "4px",
+                color: "var(--foreground)",
+                fontSize: "0.85rem",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+          {sidebarTab === "tags" && (
+            <button
+              onClick={() => setShowSidebarTypeFilter((v) => !v)}
+              className="toolbar-link"
+              title="Filtrar por tipo"
+              style={{
+                flexShrink: 0,
+                padding: "0.4rem",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "4px",
+                cursor: "pointer",
+                color: sidebarTypeFilter !== "all" || showSidebarTypeFilter ? "var(--foreground)" : "var(--text-muted)",
+                background: showSidebarTypeFilter ? "var(--panel-hover)" : "transparent",
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <FilterBookIcon />
+            </button>
+          )}
+        </div>
+
+        {sidebarTab === "tags" && showSidebarTypeFilter && (
+          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+            {CONTENT_TYPE_FILTER_OPTIONS.map((f) => (
+              <button
+                key={f.value}
+                onClick={() => setSidebarTypeFilter(f.value)}
+                className="toolbar-link"
+                style={{
+                  padding: "0.25rem 0.6rem",
+                  borderRadius: "999px",
+                  border: "1px solid var(--panel-border)",
+                  background: sidebarTypeFilter === f.value ? "var(--panel-hover)" : "transparent",
+                  color: sidebarTypeFilter === f.value ? "var(--foreground)" : "var(--text-muted)",
+                  fontWeight: sidebarTypeFilter === f.value ? "bold" : "normal",
+                  cursor: "pointer",
+                  fontSize: "0.75rem",
+                }}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {sidebarTab === "tags" && !showSidebarTypeFilter && sidebarTypeFilter !== "all" && (
+          <button
+            onClick={() => setShowSidebarTypeFilter(true)}
+            className="toolbar-link"
             style={{
-              position: "absolute",
-              left: "0.6rem",
-              top: "50%",
-              transform: "translateY(-50%)",
+              display: "block",
+              padding: 0,
+              marginBottom: "0.75rem",
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
               color: "var(--text-muted)",
-              fontSize: "0.85rem",
-              pointerEvents: "none",
+              fontSize: "0.75rem",
+              textAlign: "left",
             }}
           >
-            <SearchIcon />
-          </span>
-          <input
-            value={sidebarSearch}
-            onChange={(e) => setSidebarSearch(e.target.value)}
-            placeholder={sidebarTab === "notes" ? "Buscar notas..." : "Buscar tags..."}
-            style={{
-              width: "100%",
-              padding: "0.4rem 0.5rem 0.4rem 1.8rem",
-              background: "var(--panel-bg)",
-              border: "1px solid var(--panel-border)",
-              borderRadius: "4px",
-              color: "var(--foreground)",
-              fontSize: "0.85rem",
-              boxSizing: "border-box",
-            }}
-          />
-        </div>
+            Filtrando por: {CONTENT_TYPE_FILTER_OPTIONS.find((f) => f.value === sidebarTypeFilter)?.label}
+          </button>
+        )}
 
         {sidebarTab === "notes" &&
           sidebarNotesList.map((note) => (

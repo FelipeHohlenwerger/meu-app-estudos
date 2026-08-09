@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { formatTagLabel } from "@/lib/tagTree";
 
 type Props = {
   tags: string[];
@@ -117,7 +118,7 @@ export default function TagField({ tags, allKnownTags, onChange }: Props) {
                 color: "var(--foreground)",
               }}
             >
-              {tag}
+              {formatTagLabel(tag)}
             </button>
           ))}
           {showCreateOption && (
@@ -177,7 +178,7 @@ export function TagChips({ tags, onChange }: TagChipsProps) {
             whiteSpace: "nowrap",
           }}
         >
-          {tag}
+          {formatTagLabel(tag)}
           <button
             onClick={() => removeTag(tag)}
             title={`Remover tag "${tag}"`}
