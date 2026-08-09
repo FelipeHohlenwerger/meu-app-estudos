@@ -9,7 +9,7 @@ import { IMAGE_REGEX } from "@/lib/imageSyntax";
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
 // verdade) — a migração força um reprocessamento completo quando a versão sobe.
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 16;
 
 // Caminho da pasta de UM vault, resolvido pelo registro — nunca mais uma
 // constante fixa (ver src/lib/vaultRegistry.ts). Lança se o id não existir no
@@ -71,7 +71,27 @@ function cleanSummaryLine(line: string): string {
     .replace(/!?\[\[([^\]]+)\]\]/g, (_m, inner: string) => inner.split("#^")[0].trim())
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/\*(.+?)\*/g, "$1")
+    // Marcador de lista solta (-, *, + ou numerada) no INÍCIO da linha — o
+    // preview de texto não deve mostrar sintaxe crua de lista, só o texto.
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    // "#"/"##" de heading: extractSummary já pula uma linha que COMEÇA com
+    // "# " (nunca vira resumo), mas um item de lista tipo "- # Texto" só tem
+    // "#" exposto DEPOIS do marcador de lista ser removido acima — sem isso
+    // ficaria sintaxe crua de heading no meio do preview.
+    .replace(/^#{1,6}\s+/, "")
     .trim();
+}
+
+// Corta em até `max` caracteres SEM quebrar uma palavra ao meio — recua até o
+// último espaço antes do limite (se não houver nenhum, corta mesmo assim, é
+// uma palavra só maior que o limite).
+function truncateAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  const cut = lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+  return cut.trim() + "…";
 }
 
 function extractSummary(content: string): string {
@@ -85,15 +105,47 @@ function extractSummary(content: string): string {
 
     const cleaned = cleanSummaryLine(line);
     if (!cleaned) continue;
-    return cleaned.length > SUMMARY_MAX_LENGTH
-      ? cleaned.slice(0, SUMMARY_MAX_LENGTH).trim() + "…"
-      : cleaned;
+    return truncateAtWord(cleaned, SUMMARY_MAX_LENGTH);
   }
   return "";
 }
 
 function countWords(content: string): number {
   return content.split(/\s+/).filter(Boolean).length;
+}
+
+// Capa automática: caminho cru da PRIMEIRA imagem do corpo (mesmo grupo de
+// captura que ImageWidget usa em livePreview.ts pra resolver src local vs.
+// externo) — null se a nota não tem nenhuma imagem. IMAGE_REGEX tem a flag
+// "g" (compartilhada com cleanSummaryLine acima), por isso o reset explícito
+// de lastIndex antes de usar.
+function extractFirstImagePath(content: string): string | null {
+  IMAGE_REGEX.lastIndex = 0;
+  const match = IMAGE_REGEX.exec(content);
+  return match ? match[2] : null;
+}
+
+// "Nota-índice": corpo que, tirando link [[...]]/embed ![[...]] (removidos
+// por inteiro, não só os colchetes) e marcador de lista (com indentação),
+// sobra com menos de 60 caracteres de texto — sinal de que a nota é
+// basicamente uma lista de links, sem prosa própria. Limite simples de
+// propósito (ver pedido original): casos de fronteira podem classificar
+// errado às vezes, aceitável, sem controle manual de override.
+const INDEX_NOTE_MAX_LENGTH = 60;
+
+function computeIsIndexNote(content: string): boolean {
+  const strippedText = content
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/!?\[\[[^\]]+\]\]/g, "")
+        .replace(/^\s*[-*+]\s+/, "")
+        .replace(/^\s*\d+\.\s+/, "")
+        .trim()
+    )
+    .filter(Boolean)
+    .join(" ");
+  return strippedText.length < INDEX_NOTE_MAX_LENGTH;
 }
 
 // Uma conexão SQLite por vault — nunca compartilhada entre vaults (isolamento
@@ -126,6 +178,19 @@ function migrate(conn: DatabaseSync): void {
   }
   if (!hasColumn("is_favorite")) {
     conn.exec("ALTER TABLE notes ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0");
+  }
+  // capa manual: só escrita por PUT /api/note/cover, nunca por reindexNote —
+  // mesmo espírito de tags/status, sobrevive a re-salvar o corpo da nota.
+  if (!hasColumn("cover_manual_path")) {
+    conn.exec("ALTER TABLE notes ADD COLUMN cover_manual_path TEXT");
+  }
+  // capa automática: recalculada em todo reindexNote (primeira imagem do corpo).
+  if (!hasColumn("cover_auto_path")) {
+    conn.exec("ALTER TABLE notes ADD COLUMN cover_auto_path TEXT");
+  }
+  // "nota-índice": recalculado em todo reindexNote (ver computeIsIndexNote).
+  if (!hasColumn("is_index_note")) {
+    conn.exec("ALTER TABLE notes ADD COLUMN is_index_note INTEGER NOT NULL DEFAULT 0");
   }
   conn.exec("CREATE INDEX IF NOT EXISTS idx_notes_title ON notes(title)");
   conn.exec("CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias)");
@@ -354,18 +419,22 @@ function reindexNote(vaultId: string, filename: string, content: string, mtimeMs
   const defaultStatus = defaultStatusFor(contentType);
   const summary = extractSummary(content);
   const wordCount = countWords(content);
+  const coverAutoPath = extractFirstImagePath(content);
+  const isIndexNote = computeIsIndexNote(content);
 
   conn.exec("BEGIN");
   try {
     conn
       .prepare(
-        `INSERT INTO notes (filename, mtime_ms, title, status, summary, word_count, fonte, last_activity_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO notes (filename, mtime_ms, title, status, summary, word_count, fonte, last_activity_ms, cover_auto_path, is_index_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(filename) DO UPDATE SET
            mtime_ms = excluded.mtime_ms,
            title = excluded.title,
            summary = excluded.summary,
            word_count = excluded.word_count,
-           fonte = excluded.fonte`
+           fonte = excluded.fonte,
+           cover_auto_path = excluded.cover_auto_path,
+           is_index_note = excluded.is_index_note`
       )
       // last_activity_ms, igual a status: só entra no INSERT (semeia com o
       // mtimeMs recebido — "quando essa nota/livro foi visto pela primeira
@@ -375,7 +444,10 @@ function reindexNote(vaultId: string, filename: string, content: string, mtimeMs
       // arquivo) reescalonaria a atividade de notas que ninguém realmente
       // tocou. Atividade de verdade é sempre um touchActivity() explícito
       // (save real, comentário, mudança de status — ver chamadas abaixo).
-      .run(filename, mtimeMs, title, defaultStatus, summary, wordCount, fonte, mtimeMs);
+      // cover_manual_path NÃO entra aqui — só é escrito por setNoteCover
+      // (PUT /api/note/cover), nunca tocado por reindexNote, mesmo espírito
+      // de tags/status: sobrevive a re-salvar o corpo da nota.
+      .run(filename, mtimeMs, title, defaultStatus, summary, wordCount, fonte, mtimeMs, coverAutoPath, isIndexNote ? 1 : 0);
 
     const noteRow = conn.prepare("SELECT id FROM notes WHERE filename = ?").get(filename) as { id: number };
     const noteId = noteRow.id;
@@ -561,20 +633,30 @@ export function setNoteTags(vaultId: string, filename: string, tags: string[]): 
   }
 }
 
-// Status de estudo + tipo de conteúdo (livro/artigo vs. nota comum) + favorito
-// de UMA nota — usado por GET /api/note pra alimentar o StatusDropdown/estrela
-// ao carregar a nota (uma query só, já que os três vêm da mesma linha).
+// Status de estudo (mantido no backend, sem consumidor de UI desde a remoção
+// completa do status — ver noteStatus.ts) + tipo de conteúdo (livro/artigo vs.
+// nota comum) + favorito + capa manual de UMA nota — usado por GET /api/note
+// (uma query só, já que tudo vem da mesma linha). `coverManualPath` cru (não
+// resolvido com a automática) — o botão "+ Capa" do painel precisa saber
+// especificamente se HÁ uma capa manual definida, não o valor já resolvido.
 export function getNoteStatusInfo(
   vaultId: string,
   filename: string
-): { status: string; contentType: ContentType; isFavorite: boolean } | null {
+): { status: string; contentType: ContentType; isFavorite: boolean; coverManualPath: string | null } | null {
   const conn = getDb(vaultId);
-  const row = conn.prepare("SELECT status, fonte, is_favorite FROM notes WHERE filename = ? COLLATE NOCASE").get(filename) as
-    | { status: string | null; fonte: string | null; is_favorite: number }
+  const row = conn
+    .prepare("SELECT status, fonte, is_favorite, cover_manual_path FROM notes WHERE filename = ? COLLATE NOCASE")
+    .get(filename) as
+    | { status: string | null; fonte: string | null; is_favorite: number; cover_manual_path: string | null }
     | undefined;
   if (!row) return null;
   const contentType = contentTypeFor(filename, row.fonte);
-  return { status: row.status ?? defaultStatusFor(contentType), contentType, isFavorite: row.is_favorite === 1 };
+  return {
+    status: row.status ?? defaultStatusFor(contentType),
+    contentType,
+    isFavorite: row.is_favorite === 1,
+    coverManualPath: row.cover_manual_path,
+  };
 }
 
 // Muda o status de estudo de uma nota — único caminho de escrita da coluna
@@ -603,6 +685,14 @@ export function setNoteStatus(vaultId: string, filename: string, status: string)
 export function setNoteFavorite(vaultId: string, filename: string, isFavorite: boolean): void {
   const conn = getDb(vaultId);
   conn.prepare("UPDATE notes SET is_favorite = ? WHERE filename = ? COLLATE NOCASE").run(isFavorite ? 1 : 0, filename);
+}
+
+// Define/troca/remove a capa MANUAL de uma nota — único caminho de escrita de
+// `cover_manual_path` (PUT /api/note/cover). `coverPath: null` remove a capa
+// manual (a nota volta a mostrar a automática, se houver uma).
+export function setNoteCover(vaultId: string, filename: string, coverPath: string | null): void {
+  const conn = getDb(vaultId);
+  conn.prepare("UPDATE notes SET cover_manual_path = ? WHERE filename = ? COLLATE NOCASE").run(coverPath, filename);
 }
 
 export function getTagsByNote(vaultId: string): Record<string, string[]> {
@@ -707,6 +797,18 @@ export type LibraryNote = {
   // "Editados recentemente" da Homepage.
   lastActivityMs: number;
   isFavorite: boolean;
+  // Já resolvido: cover_manual_path ?? cover_auto_path (manual tem
+  // prioridade) — quem exibe o card não precisa saber a origem.
+  coverPath: string | null;
+  // Cru (não resolvido) — só usado por quem precisa distinguir manual de
+  // automática (ex: menu "..." do card na Homepage decide entre "abrir
+  // seletor direto" vs "trocar/remover", mesmo critério do botão "+ Capa" do
+  // painel, ver NotePanel.tsx).
+  coverManualPath: string | null;
+  isIndexNote: boolean;
+  // Só relevante quando isIndexNote — contagem de links [[nota]] distintos
+  // que essa nota faz (derivado de `links`, não uma coluna própria).
+  linkedNotesCount: number;
 };
 
 // Dados pra tela inicial "biblioteca": uma linha por nota, já com tags/status/
@@ -714,7 +816,9 @@ export type LibraryNote = {
 export function getLibraryData(vaultId: string): LibraryNote[] {
   const conn = getDb(vaultId);
   const notesRows = conn
-    .prepare("SELECT id, filename, title, status, summary, word_count, fonte, last_activity_ms, is_favorite FROM notes ORDER BY filename")
+    .prepare(
+      "SELECT id, filename, title, status, summary, word_count, fonte, last_activity_ms, is_favorite, cover_manual_path, cover_auto_path, is_index_note FROM notes ORDER BY filename"
+    )
     .all() as {
     id: number;
     filename: string;
@@ -725,14 +829,26 @@ export function getLibraryData(vaultId: string): LibraryNote[] {
     fonte: string | null;
     last_activity_ms: number | null;
     is_favorite: number;
+    cover_manual_path: string | null;
+    cover_auto_path: string | null;
+    is_index_note: number;
   }[];
   const tagsRows = conn.prepare("SELECT note_id, tag FROM tags").all() as { note_id: number; tag: string }[];
+  // Contagem de links de saída distintos por nota — UNIQUE(source_note_id,
+  // target_raw) na tabela já garante que cada alvo só conta uma vez.
+  const linkCountRows = conn
+    .prepare("SELECT source_note_id, COUNT(*) AS count FROM links GROUP BY source_note_id")
+    .all() as { source_note_id: number; count: number }[];
 
   const tagsByNoteId = new Map<number, string[]>();
   for (const row of tagsRows) {
     const list = tagsByNoteId.get(row.note_id) ?? [];
     list.push(row.tag);
     tagsByNoteId.set(row.note_id, list);
+  }
+  const linkCountByNoteId = new Map<number, number>();
+  for (const row of linkCountRows) {
+    linkCountByNoteId.set(row.source_note_id, row.count);
   }
 
   return notesRows.map((n) => {
@@ -747,6 +863,10 @@ export function getLibraryData(vaultId: string): LibraryNote[] {
       wordCount: n.word_count ?? 0,
       lastActivityMs: n.last_activity_ms ?? 0,
       isFavorite: n.is_favorite === 1,
+      coverPath: n.cover_manual_path ?? n.cover_auto_path,
+      coverManualPath: n.cover_manual_path,
+      isIndexNote: n.is_index_note === 1,
+      linkedNotesCount: linkCountByNoteId.get(n.id) ?? 0,
     };
   });
 }

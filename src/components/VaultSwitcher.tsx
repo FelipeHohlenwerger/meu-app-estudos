@@ -49,7 +49,65 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
   const ref = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
+  // Config da biblioteca Calibre — separada do registro de vaults (não é um
+  // vault, é uma pasta externa só lida, ver src/lib/calibreConfig.ts).
+  const [calibrePath, setCalibrePath] = useState<string | null>(null);
+  const [calibreEditing, setCalibreEditing] = useState(false);
+  const [calibreDraft, setCalibreDraft] = useState("");
+  const [calibreSaving, setCalibreSaving] = useState(false);
+  const [calibreError, setCalibreError] = useState<string | null>(null);
+
   const activeVault = vaults.find((v) => v.id === activeVaultId);
+
+  useEffect(() => {
+    if (!open) return;
+    fetch("/api/calibre/config")
+      .then((res) => res.json())
+      .then((data) => setCalibrePath(data.libraryPath ?? null));
+  }, [open]);
+
+  async function saveCalibrePath(libraryPath: string) {
+    setCalibreSaving(true);
+    setCalibreError(null);
+    try {
+      const res = await fetch("/api/calibre/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ libraryPath }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCalibreError(data.error ?? "Não foi possível encontrar uma biblioteca Calibre nesse caminho");
+        return;
+      }
+      setCalibrePath(data.libraryPath);
+      setCalibreEditing(false);
+      setCalibreDraft("");
+    } finally {
+      setCalibreSaving(false);
+    }
+  }
+
+  function clearCalibrePath() {
+    fetch("/api/calibre/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ libraryPath: null }),
+    }).then(() => setCalibrePath(null));
+  }
+
+  // Mesmo comando Rust `pick_folder` já usado pra registrar vault existente
+  // (genérico, não específico de vault) — ver comentário em handlePickFolder.
+  async function handlePickCalibreFolder() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const selected = await invoke<string | null>("pick_folder");
+      if (typeof selected !== "string") return;
+      await saveCalibrePath(selected);
+    } catch (err) {
+      setCalibreError("Não foi possível abrir o seletor de pasta: " + String(err));
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -309,6 +367,109 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
           >
             + Novo vault
           </button>
+
+          <div style={{ borderTop: "1px solid var(--panel-border)", margin: "0.3rem 0" }} />
+
+          <div style={{ padding: "0.3rem 0.5rem 0.4rem" }}>
+            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "0.35rem", fontWeight: "bold", textTransform: "uppercase", letterSpacing: "0.02em" }}>
+              Biblioteca Calibre
+            </div>
+
+            {calibreEditing ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                <input
+                  autoFocus
+                  value={calibreDraft}
+                  onChange={(e) => setCalibreDraft(e.target.value)}
+                  placeholder="/caminho/da/biblioteca"
+                  style={{
+                    padding: "0.4rem 0.5rem",
+                    border: "1px solid var(--panel-border)",
+                    borderRadius: "4px",
+                    background: "var(--background)",
+                    color: "var(--foreground)",
+                    fontSize: "13px",
+                  }}
+                />
+                <div style={{ display: "flex", gap: "0.3rem" }}>
+                  <button
+                    onClick={() => saveCalibrePath(calibreDraft)}
+                    disabled={calibreSaving || !calibreDraft.trim()}
+                    className="toolbar-link"
+                    style={{
+                      padding: "0.3rem 0.6rem",
+                      background: "transparent",
+                      border: "1px solid var(--panel-border)",
+                      borderRadius: "4px",
+                      cursor: calibreSaving ? "default" : "pointer",
+                      fontSize: "12px",
+                      color: "var(--foreground)",
+                    }}
+                  >
+                    {calibreSaving ? "Salvando..." : "Salvar"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCalibreEditing(false);
+                      setCalibreError(null);
+                    }}
+                    className="toolbar-link"
+                    style={{
+                      padding: "0.3rem 0.6rem",
+                      background: "transparent",
+                      border: "1px solid var(--panel-border)",
+                      borderRadius: "4px",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                <div style={{ fontSize: "12px", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {calibrePath ?? "Não configurado"}
+                </div>
+                <div style={{ display: "flex", gap: "0.3rem" }}>
+                  {isTauri() ? (
+                    <button
+                      onClick={handlePickCalibreFolder}
+                      className="toolbar-link"
+                      style={{ padding: "0.3rem 0.6rem", background: "transparent", border: "1px solid var(--panel-border)", borderRadius: "4px", cursor: "pointer", fontSize: "12px", color: "var(--foreground)" }}
+                    >
+                      Escolher pasta...
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setCalibreEditing(true);
+                        setCalibreDraft(calibrePath ?? "");
+                        setCalibreError(null);
+                      }}
+                      className="toolbar-link"
+                      style={{ padding: "0.3rem 0.6rem", background: "transparent", border: "1px solid var(--panel-border)", borderRadius: "4px", cursor: "pointer", fontSize: "12px", color: "var(--foreground)" }}
+                    >
+                      {calibrePath ? "Trocar" : "Configurar"}
+                    </button>
+                  )}
+                  {calibrePath && (
+                    <button
+                      onClick={clearCalibrePath}
+                      className="toolbar-link"
+                      style={{ padding: "0.3rem 0.6rem", background: "transparent", border: "1px solid var(--panel-border)", borderRadius: "4px", cursor: "pointer", fontSize: "12px", color: "#d04444" }}
+                    >
+                      Remover
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {calibreError && <div style={{ color: "#d04444", fontSize: "11px", marginTop: "0.35rem" }}>{calibreError}</div>}
+          </div>
         </div>
       )}
 

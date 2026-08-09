@@ -25,6 +25,10 @@ export type AnchoredComment = { id: number; tipo: string; texto: string; comenta
 
 type Props = {
   filename: string;
+  // Só passado quando o "livro" é do Calibre (não do vault) — troca as 3
+  // chamadas (GET/POST/DELETE) pras rotas /api/calibre/book-comments em vez
+  // de /api/book-comments, chaveadas por calibreId em vez de filename.
+  calibreId?: number;
   // Abaixo do breakpoint (ver useIsMobile.ts) — troca a coluna lateral
   // animada por width por uma folha fixa que sobe de baixo pra cima.
   isMobile?: boolean;
@@ -85,6 +89,7 @@ type MergedItem =
 // reflete a ordem real de criação mesmo misturando os dois tipos).
 export default function BookCommentsPanel({
   filename,
+  calibreId,
   isMobile,
   open,
   onClose,
@@ -103,7 +108,11 @@ export default function BookCommentsPanel({
   const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
   useEffect(() => {
-    vaultFetch(`/api/book-comments?filename=${encodeURIComponent(filename)}`)
+    const request =
+      calibreId !== undefined
+        ? fetch(`/api/calibre/book-comments?calibreId=${calibreId}`)
+        : vaultFetch(`/api/book-comments?filename=${encodeURIComponent(filename)}`);
+    request
       .then((res) => res.json())
       .then((data) =>
         // Placeholders ancorados de .md (anchored=1, sem anchorCfi) ficam de
@@ -112,7 +121,7 @@ export default function BookCommentsPanel({
         // normalmente aqui, já que carregam tipo/comment reais.
         setComments((data.comments ?? []).filter((c: BookComment & { anchored?: boolean }) => !c.anchored || c.anchorCfi))
       );
-  }, [filename, vaultFetch]);
+  }, [filename, calibreId, vaultFetch]);
 
   useEffect(() => {
     if (!open || scrollToId == null) return;
@@ -128,17 +137,25 @@ export default function BookCommentsPanel({
     const tipo = pendingTipo;
     setPendingTipo(null);
     if (!tipo) return;
-    const res = await vaultFetch("/api/book-comments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename, tipo, comment: texto }),
-    });
+    const res =
+      calibreId !== undefined
+        ? await fetch("/api/calibre/book-comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ calibreId, tipo, comment: texto }),
+          })
+        : await vaultFetch("/api/book-comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename, tipo, comment: texto }),
+          });
     const data = await res.json();
     if (data.comment) setComments((prev) => [...prev, data.comment]);
   }
 
   async function handleDelete(id: number) {
-    await vaultFetch(`/api/book-comments/${id}`, { method: "DELETE" });
+    if (calibreId !== undefined) await fetch(`/api/calibre/book-comments/${id}`, { method: "DELETE" });
+    else await vaultFetch(`/api/book-comments/${id}`, { method: "DELETE" });
     setComments((prev) => prev.filter((c) => c.id !== id));
   }
 

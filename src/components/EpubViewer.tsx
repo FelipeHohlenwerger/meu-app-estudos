@@ -93,6 +93,13 @@ type Props = {
   // — NotePanel.tsx reusa o mesmo estado que já abre/rola o painel de
   // comentários pro marcador de .md.
   onMarkerClick?: (commentId: number) => void;
+  // Só passados pra livro do Calibre — ver PdfNativeViewer.tsx (mesmo
+  // espírito). calibreId roteia os comentários ancorados auto-contidos
+  // (gerados pelas ações de IA) pras rotas /api/calibre/book-comments em vez
+  // de /api/book-comments.
+  sourceUrl?: string;
+  linkLabel?: string;
+  calibreId?: number;
 };
 
 export type EpubViewerHandle = {
@@ -140,7 +147,7 @@ async function extractSectionText(section: any, request: (path: string) => Promi
 // página normal — e continua funcionando agora, porque o novo listener
 // (rendition.on("selected")) nunca toca na seleção, só lê.
 const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
-  { filename, theme, initialChapter, onMarkerClick },
+  { filename, theme, initialChapter, onMarkerClick, sourceUrl, linkLabel, calibreId },
   ref
 ) {
   const { vaultId, vaultFetch } = useVault();
@@ -193,7 +200,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
 
   function handleCopyLink() {
     if (!currentChapterRef.current) return;
-    navigator.clipboard.writeText(`[[${filename}#cap${currentChapterRef.current}]]`);
+    navigator.clipboard.writeText(`[[${linkLabel ?? filename}#cap${currentChapterRef.current}]]`);
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 1500);
   }
@@ -217,18 +224,25 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
 
     try {
       const resultado = await requestAiAction(action, texto);
-      const res = await vaultFetch("/api/book-comments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filename,
-          anchored: true,
-          tipo: "ia",
-          comment: resultado,
-          anchorCfi: cfiRange,
-          anchorText: texto,
-        }),
-      });
+      const res =
+        calibreId !== undefined
+          ? await fetch("/api/calibre/book-comments", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ calibreId, tipo: "ia", comment: resultado, anchorCfi: cfiRange, anchorText: texto }),
+            })
+          : await vaultFetch("/api/book-comments", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                filename,
+                anchored: true,
+                tipo: "ia",
+                comment: resultado,
+                anchorCfi: cfiRange,
+                anchorText: texto,
+              }),
+            });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Não foi possível salvar o comentário");
       if (renditionRef.current && data.comment?.id) {
@@ -280,9 +294,10 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // no path; sem essa opção, a extensão detectada fica vazia e o epub.js
       // cai no modo "directory" (tenta buscar META-INF/container.xml relativo
       // à URL, 404), nunca chegando a abrir o livro de verdade.
-      book = EpubMod(`/api/note/file?filename=${encodeURIComponent(filename)}&vault=${encodeURIComponent(vaultId)}`, {
-        openAs: "epub",
-      });
+      book = EpubMod(
+        sourceUrl ?? `/api/note/file?filename=${encodeURIComponent(filename)}&vault=${encodeURIComponent(vaultId)}`,
+        { openAs: "epub" }
+      );
       bookRef.current = book;
       const rendition = book.renderTo(viewerEl, {
         width: initialSize.width,
@@ -380,7 +395,10 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // capítulo é renderizado (hook interno já embutido em
       // rendition.annotations), não precisa reanexar ao trocar de capítulo.
       try {
-        const res = await vaultFetch(`/api/book-comments?filename=${encodeURIComponent(filename)}`);
+        const res =
+          calibreId !== undefined
+            ? await fetch(`/api/calibre/book-comments?calibreId=${calibreId}`)
+            : await vaultFetch(`/api/book-comments?filename=${encodeURIComponent(filename)}`);
         const data = await res.json();
         if (cancelled) return;
         const anchored = (data.comments ?? []).filter(

@@ -1,6 +1,6 @@
 "use client";
 
-type Entry = { label: string; filename: string };
+type Entry = { label: string; filename: string; source?: "note" | "calibre" };
 
 type Props = {
   x: number;
@@ -57,7 +57,10 @@ export default function WikiLinkMenu({ x, y, entries, selectedIndex, onSelect }:
           key={entry.filename}
           onClick={() => onSelect(entry)}
           style={{
-            display: "block",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "0.5rem",
             width: "100%",
             textAlign: "left",
             padding: "0.4rem 0.6rem",
@@ -69,7 +72,23 @@ export default function WikiLinkMenu({ x, y, entries, selectedIndex, onSelect }:
             color: "var(--foreground)",
           }}
         >
-          {entry.label}
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.label}</span>
+          {entry.source === "calibre" && (
+            <span
+              style={{
+                flexShrink: 0,
+                padding: "0.1rem 0.4rem",
+                borderRadius: "999px",
+                background: "var(--panel-border)",
+                color: "var(--text-muted)",
+                fontSize: "10px",
+                fontWeight: "bold",
+                letterSpacing: "0.02em",
+              }}
+            >
+              Calibre
+            </span>
+          )}
         </button>
       ))}
     </div>

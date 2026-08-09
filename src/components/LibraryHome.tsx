@@ -2,25 +2,31 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
-import { STATUS_COLORS } from "@/lib/colors";
-import { STATUS_LABELS, NOTE_STATUS_ORDER } from "@/lib/noteStatus";
+import CalibreBookCard from "@/components/CalibreBookCard";
+import type { CalibreBook } from "@/lib/calibreLibrary";
 import { formatRelativeTime } from "@/lib/relativeTime";
 import { formatTagLabel } from "@/lib/tagTree";
 
 type Props = {
   notes: LibraryNote[];
   onOpenNote: (filename: string) => void;
-  onRenameNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
   onViewTag: (tag: string | null) => void;
   // Só o nome do macro-tema é clicável (ver seção de temas mais abaixo) — vai
   // pra página de foco (TagFocusPage), diferente de onViewTag(null), que
   // continua indo pra lista plana "Sem categoria".
   onViewTagFocus: (macroTag: string) => void;
-  onViewStatus: (status: string) => void;
   onViewRecent: () => void;
   onViewFavorites: () => void;
   onToggleFavorite: (filename: string) => void;
+  onCoverChanged: () => void;
+  // Biblioteca Calibre configurada — card de destaque (algumas capas + total)
+  // que leva pra página cheia da galeria. Ausente/vazia quando não há
+  // biblioteca configurada, o card inteiro some.
+  calibreBooks: CalibreBook[];
+  onOpenCalibreBook: (book: CalibreBook) => void;
+  onViewCalibreLibrary: () => void;
   onOpenNewNoteMenu: (rect: DOMRect, direction?: "down-right" | "up-left") => void;
   onFileDropped: (file: File) => void;
   // Mesmas 3 ações do menu "+" — reaproveitadas em destaque no estado vazio
@@ -126,17 +132,23 @@ function SectionGrid({
   onDeleteNote,
   onViewMore,
   onToggleFavorite,
+  onCoverChanged,
 }: {
   notes: LibraryNote[];
   onOpenNote: (filename: string) => void;
-  onRenameNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
-  onViewMore: () => void;
+  // Opcional — só a seção "Sem categoria" liga isso (sem título clicável
+  // próprio, precisa de algum jeito de ver o resto). Seções por tema não
+  // passam mais nada aqui: o título já é clicável e leva à página de foco,
+  // então o card "+N outras" ficaria redundante.
+  onViewMore?: () => void;
   onToggleFavorite: (filename: string) => void;
+  onCoverChanged: () => void;
 }) {
   const COLUMNS = 4;
-  const showMoreCard = notes.length > COLUMNS;
-  const visibleNotes = showMoreCard ? notes.slice(0, COLUMNS - 1) : notes;
+  const showMoreCard = !!onViewMore && notes.length > COLUMNS;
+  const visibleNotes = showMoreCard ? notes.slice(0, COLUMNS - 1) : notes.slice(0, COLUMNS);
   const remaining = notes.length - visibleNotes.length;
 
   return (
@@ -146,10 +158,11 @@ function SectionGrid({
           key={note.filename}
           note={note}
           onClick={() => onOpenNote(note.filename)}
-          onRename={() => onRenameNote(note.filename)}
+          onRename={(newTitle, onSettled) => onRenameNote(note.filename, newTitle, onSettled)}
           onDelete={() => onDeleteNote(note.filename)}
           isFavorite={note.isFavorite}
           onToggleFavorite={() => onToggleFavorite(note.filename)}
+          onCoverChanged={onCoverChanged}
         />
       ))}
       {showMoreCard && (
@@ -194,13 +207,15 @@ function CardRow({
   onRenameNote,
   onDeleteNote,
   onToggleFavorite,
+  onCoverChanged,
 }: {
   notes: LibraryNote[];
   getMeta?: (note: LibraryNote) => string;
   onOpenNote: (filename: string) => void;
-  onRenameNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
   onToggleFavorite: (filename: string) => void;
+  onCoverChanged: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -236,45 +251,14 @@ function CardRow({
           note={note}
           metaOverride={getMeta?.(note)}
           onClick={() => onOpenNote(note.filename)}
-          onRename={() => onRenameNote(note.filename)}
+          onRename={(newTitle, onSettled) => onRenameNote(note.filename, newTitle, onSettled)}
           onDelete={() => onDeleteNote(note.filename)}
           isFavorite={note.isFavorite}
           onToggleFavorite={() => onToggleFavorite(note.filename)}
+          onCoverChanged={onCoverChanged}
         />
       ))}
     </div>
-  );
-}
-
-function StatusCounter({ status, count, onClick }: { status: string; count: number; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="toolbar-link"
-      style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
-    >
-      <div style={{ fontSize: "1.8em" }}>{count}</div>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "6px",
-          fontSize: "0.8rem",
-          color: "var(--text-muted)",
-        }}
-      >
-        <span
-          style={{
-            width: "6px",
-            height: "6px",
-            borderRadius: "50%",
-            background: STATUS_COLORS[status],
-            display: "inline-block",
-          }}
-        />
-        {STATUS_LABELS[status]}
-      </div>
-    </button>
   );
 }
 
@@ -285,10 +269,13 @@ export default function LibraryHome({
   onDeleteNote,
   onViewTag,
   onViewTagFocus,
-  onViewStatus,
   onViewRecent,
   onViewFavorites,
   onToggleFavorite,
+  onCoverChanged,
+  calibreBooks,
+  onOpenCalibreBook,
+  onViewCalibreLibrary,
   onOpenNewNoteMenu,
   onFileDropped,
   onCreateBlank,
@@ -317,11 +304,6 @@ export default function LibraryHome({
   }
   const sortedMacroTags = Array.from(macroTagMap.entries()).sort((a, b) => b[1].length - a[1].length);
   const untaggedNotes = notes.filter((n) => n.tags.length === 0);
-
-  const statusCounts = new Map<string, number>();
-  for (const note of notes) {
-    statusCounts.set(note.status, (statusCounts.get(note.status) ?? 0) + 1);
-  }
 
   // Mais recente primeiro. Cortado a um teto generoso antes de passar pro
   // CardRow — ele mesmo decide quantas cabem na largura disponível (nunca
@@ -389,24 +371,6 @@ export default function LibraryHome({
         {sortedMacroTags.length === 1 ? "tema" : "temas"}
       </p>
 
-      <section style={sectionDividerStyle}>
-        <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>Progresso</h2>
-
-        <div>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Notas</div>
-          <div style={{ display: "flex", gap: "2.5rem", flexWrap: "wrap" }}>
-            {NOTE_STATUS_ORDER.map((status) => (
-              <StatusCounter
-                key={status}
-                status={status}
-                count={statusCounts.get(status) ?? 0}
-                onClick={() => onViewStatus(status)}
-              />
-            ))}
-          </div>
-        </div>
-      </section>
-
       {/* Favoritos + Editados recentemente lado a lado (cada metade da
           largura) — sem Favoritos (nenhuma nota favoritada), a única coluna
           (Editados) ocupa a largura inteira sozinha via flex:1, sem CSS
@@ -430,6 +394,7 @@ export default function LibraryHome({
                   onRenameNote={onRenameNote}
                   onDeleteNote={onDeleteNote}
                   onToggleFavorite={onToggleFavorite}
+                  onCoverChanged={onCoverChanged}
                 />
               </div>
             )}
@@ -453,6 +418,7 @@ export default function LibraryHome({
                 onRenameNote={onRenameNote}
                 onDeleteNote={onDeleteNote}
                 onToggleFavorite={onToggleFavorite}
+                onCoverChanged={onCoverChanged}
               />
             </div>
           </div>
@@ -484,8 +450,8 @@ export default function LibraryHome({
             onOpenNote={onOpenNote}
             onRenameNote={onRenameNote}
             onDeleteNote={onDeleteNote}
-            onViewMore={() => onViewTagFocus(macro)}
             onToggleFavorite={onToggleFavorite}
+            onCoverChanged={onCoverChanged}
           />
         </section>
       ))}
@@ -504,9 +470,26 @@ export default function LibraryHome({
           onDeleteNote={onDeleteNote}
           onViewMore={() => onViewTag(null)}
           onToggleFavorite={onToggleFavorite}
+          onCoverChanged={onCoverChanged}
         />
       </section>
       </>
+      )}
+
+      {calibreBooks.length > 0 && (
+        <section style={sectionDividerStyle}>
+          <h2 className="tag-link" onClick={onViewCalibreLibrary} style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
+            Biblioteca Calibre{" "}
+            <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
+              ({calibreBooks.length} {calibreBooks.length === 1 ? "livro" : "livros"})
+            </span>
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(6, ${CARD_ROW_MIN_WIDTH}px)`, gap: "1rem" }}>
+            {calibreBooks.slice(0, 6).map((book) => (
+              <CalibreBookCard key={book.id} book={book} onClick={() => onOpenCalibreBook(book)} />
+            ))}
+          </div>
+        </section>
       )}
 
       <button

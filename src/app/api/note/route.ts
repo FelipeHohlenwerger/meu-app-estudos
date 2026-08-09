@@ -55,6 +55,7 @@ export async function GET(request: NextRequest) {
       status: statusInfo?.status,
       contentType: statusInfo?.contentType,
       isFavorite: statusInfo?.isFavorite ?? false,
+      coverManualPath: statusInfo?.coverManualPath ?? null,
     });
   } catch (error) {
     return NextResponse.json(

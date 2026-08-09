@@ -102,6 +102,11 @@ export default function TagField({ tags, allKnownTags, onChange }: Props) {
             minWidth: "160px",
           }}
         >
+          {/* onMouseEnter/onMouseLeave em vez de confiar só no CSS ":hover" —
+              o "background: transparent" inline abaixo tem mais especificidade
+              que a regra ".toolbar-link:hover" de globals.css, então o hover
+              da classe nunca vencia (mesmo problema já resolvido assim no
+              botão "Excluir" de NoteRowMenu.tsx). */}
           {suggestions.map((tag) => (
             <button
               key={tag}
@@ -117,6 +122,8 @@ export default function TagField({ tags, allKnownTags, onChange }: Props) {
                 fontSize: "13px",
                 color: "var(--foreground)",
               }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel-hover)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
               {formatTagLabel(tag)}
             </button>
@@ -135,6 +142,8 @@ export default function TagField({ tags, allKnownTags, onChange }: Props) {
                 fontSize: "13px",
                 color: "var(--accent, var(--foreground))",
               }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel-hover)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
               Criar tag: “{draft.trim()}”
             </button>

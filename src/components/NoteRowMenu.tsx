@@ -1,18 +1,34 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 type Props = {
-  x: number;
-  y: number;
+  triggerRect: { left: number; top: number; bottom: number };
   onOpen?: () => void;
   onRename: () => void;
   onDelete: () => void;
   onClose: () => void;
+  // Só passado pelo menu do card na Homepage (NoteCard.tsx) — permite
+  // adicionar/trocar a capa direto do menu "...", sem precisar abrir a nota.
+  onAddCover?: () => void;
 };
 
-export default function NoteRowMenu({ x, y, onOpen, onRename, onDelete, onClose }: Props) {
+export default function NoteRowMenu({ triggerRect, onOpen, onRename, onDelete, onClose, onAddCover }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  // Palpite inicial: abre abaixo do gatilho, igual sempre foi. useLayoutEffect
+  // roda antes do paint, então se precisar corrigir pra cima (perto da borda
+  // inferior da tela) não há flash visível na posição errada.
+  const [top, setTop] = useState(triggerRect.bottom + 4);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const menuHeight = el.offsetHeight;
+    const margin = 8;
+    const overflowsBottom = triggerRect.bottom + menuHeight + margin > window.innerHeight;
+    const fitsAbove = triggerRect.top - menuHeight - margin > 0;
+    setTop(overflowsBottom && fitsAbove ? triggerRect.top - menuHeight - 4 : triggerRect.bottom + 4);
+  }, [triggerRect.left, triggerRect.top, triggerRect.bottom]);
 
   useEffect(() => {
     function handleMouseDown(e: MouseEvent) {
@@ -40,8 +56,8 @@ export default function NoteRowMenu({ x, y, onOpen, onRename, onDelete, onClose 
       onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
-        left: x,
-        top: y,
+        left: triggerRect.left,
+        top,
         background: "var(--panel-bg)",
         border: "1px solid var(--panel-border)",
         borderRadius: "6px",
@@ -88,6 +104,24 @@ export default function NoteRowMenu({ x, y, onOpen, onRename, onDelete, onClose 
       >
         Renomear
       </button>
+      {onAddCover && (
+        <button
+          onClick={onAddCover}
+          className="toolbar-link"
+          style={{
+            padding: "0.45rem 0.6rem",
+            background: "transparent",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            textAlign: "left",
+            fontSize: "13px",
+            color: "var(--foreground)",
+          }}
+        >
+          Adicionar capa
+        </button>
+      )}
       <button
         onClick={onDelete}
         style={{

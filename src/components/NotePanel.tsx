@@ -35,8 +35,8 @@ import CalloutSlashMenu from "@/components/CalloutSlashMenu";
 import WikiLinkMenu from "@/components/WikiLinkMenu";
 import FootnotePopup from "@/components/FootnotePopup";
 import ImageControlPanel from "@/components/ImageControlPanel";
-import StatusDropdown from "@/components/StatusDropdown";
 import FontSizePopup from "@/components/FontSizePopup";
+import CoverMenu from "@/components/CoverMenu";
 import TagField, { TagChips } from "@/components/TagField";
 import { StarIcon } from "@/components/NoteCard";
 import PdfNativeViewer from "@/components/PdfNativeViewer";
@@ -58,8 +58,9 @@ import {
 import { extractHighlightEntries, generateHighlightsPdf } from "@/lib/exportHighlights";
 import { requestAiAction, type AiAction } from "@/lib/aiActions";
 import { calloutColorsPalette } from "@/lib/colors";
+import { uploadAndSetCover, removeCover } from "@/lib/coverActions";
 import { useVault } from "@/lib/vaultContext";
-import { defaultStatusFor, type ContentType } from "@/lib/noteStatus";
+import type { CalibreBook } from "@/lib/calibreLibrary";
 import { cssVarForFont, type NoteFontId } from "@/lib/fonts";
 
 const customHighlightStyle = HighlightStyle.define([
@@ -201,15 +202,20 @@ type NotePanelProps = {
   isFontSizeOverridden: boolean;
   noteFont: NoteFontId;
   isNoteFontOverridden: boolean;
-  noteTargets: { filename: string; title: string; aliases: string[] }[];
+  noteTargets: { filename: string; title: string; aliases: string[]; source?: "note" | "calibre" }[];
   allTags: string[];
+  // Lista completa (já carregada em page.tsx) — usada pra resolver detalhes
+  // de um livro do Calibre aberto neste painel (pseudo-filename
+  // "calibre:<id>:<FORMAT>", ver isCalibreBook abaixo) sem precisar de uma
+  // rota [id] própria, mesmo padrão "bulk fetch, filtra em memória" do resto
+  // do app.
+  calibreBooks: CalibreBook[];
   closable?: boolean;
   onClose?: () => void;
   onFocus: () => void;
   onFilenameChange: (next: string | null) => void;
   onLibraryChanged: () => void;
   onTagsChanged: (filename: string, tags: string[]) => void;
-  onStatusChanged: (filename: string, status: string) => void;
   onFavoriteChanged: (filename: string, isFavorite: boolean) => void;
   onFontSizeChange: (filename: string | null, size: number) => void;
   onToggleFontSizeOverride: (filename: string, checked: boolean, currentSize: number) => void;
@@ -250,13 +256,13 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     isNoteFontOverridden,
     noteTargets,
     allTags,
+    calibreBooks,
     closable,
     onClose,
     onFocus,
     onFilenameChange,
     onLibraryChanged,
     onTagsChanged,
-    onStatusChanged,
     onFontSizeChange,
     onToggleFontSizeOverride,
     onNoteFontChange,
@@ -271,11 +277,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   const [noteTags, setNoteTags] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [isFavorite, setIsFavorite] = useState(false);
-  // Status de ESTUDO (dropdown no painel de controles) — nome diferente do
-  // `status`/`setStatus` acima de propósito, que é só a mensagem de
-  // "Salvando.../Salvo!" do autosave, sem relação nenhuma com isso.
-  const [studyStatus, setStudyStatus] = useState("");
-  const [contentType, setContentType] = useState<ContentType>("note");
+  // Capa MANUAL (cru, não resolvido com a automática) — o botão "+ Capa"
+  // decide seu próprio comportamento (abrir seletor direto vs. popup de
+  // trocar/remover) só com base nisso, nunca na capa automática.
+  const [coverManualPath, setCoverManualPath] = useState<string | null>(null);
+  const [coverMenuAnchor, setCoverMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [editingHighlight, setEditingHighlight] = useState<{
     from: number;
     to: number;
@@ -363,6 +369,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   const [editorReady, setEditorReady] = useState(0);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
+  const coverFileInputRef = useRef<HTMLInputElement>(null);
 
   const pendingSaveRef = useRef<{ filename: string; content: string } | null>(null);
   const skipNextAutosaveRef = useRef(false);
@@ -378,7 +385,28 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     value: string;
   } | null>(null);
 
-  const viewerKind = filename && /\.pdf$/i.test(filename) ? "pdf" : filename && /\.epub$/i.test(filename) ? "epub" : null;
+  // Pseudo-filename "calibre:<id>:<FORMAT>" — identidade de um livro do
+  // Calibre em todo lugar que só conhecia "filename de nota" até aqui (ver
+  // decisão de arquitetura no plano). O resto do app (page.tsx, split-screen)
+  // continua tratando isso como uma string comum; só este painel e os
+  // visualizadores precisam reconhecer o prefixo.
+  const calibreMatch = filename?.match(/^calibre:(\d+):(.+)$/);
+  const isCalibreBook = !!calibreMatch;
+  const calibreId = calibreMatch ? Number(calibreMatch[1]) : null;
+  const calibreFormat = calibreMatch ? calibreMatch[2] : null;
+  const calibreBook = calibreId !== null ? calibreBooks.find((b) => b.id === calibreId) ?? null : null;
+
+  const viewerKind = isCalibreBook
+    ? calibreFormat === "EPUB"
+      ? "epub"
+      : calibreFormat === "PDF"
+        ? "pdf"
+        : null
+    : filename && /\.pdf$/i.test(filename)
+      ? "pdf"
+      : filename && /\.epub$/i.test(filename)
+        ? "epub"
+        : null;
 
   const highlightEntries = useMemo(() => {
     if (!filename || viewerKind) return [];
@@ -483,17 +511,37 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onTagsChanged(filename, nextTags);
   }
 
-  function handleStatusChange(nextStatus: string) {
-    if (!filename) return;
-    setStudyStatus(nextStatus);
-    onStatusChanged(filename, nextStatus);
-  }
-
   function handleFavoriteToggle() {
     if (!filename) return;
     const next = !isFavorite;
     setIsFavorite(next);
     onFavoriteChanged(filename, next);
+  }
+
+  // Botão "+ Capa": sem capa manual ainda, abre o seletor de arquivo direto
+  // (mesmo gesto do "+ tag"); com uma já definida, abre o popup de
+  // trocar/remover (CoverMenu) em vez de ir direto pro seletor de novo.
+  function handleCoverButtonClick(rect: DOMRect) {
+    if (coverManualPath) {
+      setCoverMenuAnchor({ x: rect.left, y: rect.bottom + 4 });
+    } else {
+      coverFileInputRef.current?.click();
+    }
+  }
+
+  async function handleCoverFileSelected(file: File) {
+    if (!filename) return;
+    const path = await uploadAndSetCover(vaultFetch, filename, file);
+    if (!path) return;
+    setCoverManualPath(path);
+    onLibraryChanged();
+  }
+
+  function handleRemoveCover() {
+    if (!filename) return;
+    setCoverManualPath(null);
+    setCoverMenuAnchor(null);
+    removeCover(vaultFetch, filename).then(() => onLibraryChanged());
   }
 
   function handleExportHighlights() {
@@ -601,11 +649,24 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   }, [filename, editorReady]);
 
   useEffect(() => {
-    setTitleDraft(filename ? stripMdExtension(filename) : "");
-  }, [filename]);
+    setTitleDraft(isCalibreBook ? calibreBook?.title ?? "" : filename ? stripMdExtension(filename) : "");
+  }, [filename, isCalibreBook, calibreBook?.title]);
 
+  // Livro do Calibre nunca vem de /api/note (não é uma nota do vault) — os
+  // detalhes já estão em `calibreBooks` (bulk-carregado em page.tsx). Reseta
+  // o estado "de nota" pra um livro do Calibre não herdar tags/favorito/capa
+  // da nota aberta anteriormente neste mesmo painel.
   useEffect(() => {
     if (!filename) return;
+    if (isCalibreBook) {
+      setContent("");
+      setStatus("");
+      setBacklinks([]);
+      setNoteTags([]);
+      setIsFavorite(false);
+      setCoverManualPath(null);
+      return;
+    }
     setStatus("Carregando...");
     vaultFetch(`/api/note?filename=${encodeURIComponent(filename)}`)
       .then((res) => res.json())
@@ -616,15 +677,13 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           setStatus("Carregado.");
           setBacklinks(data.backlinks ?? []);
           setNoteTags(data.tags ?? []);
-          const nextContentType: ContentType = data.contentType ?? "note";
-          setContentType(nextContentType);
-          setStudyStatus(data.status ?? defaultStatusFor(nextContentType));
           setIsFavorite(!!data.isFavorite);
+          setCoverManualPath(data.coverManualPath ?? null);
         } else {
           setStatus("Erro ao carregar: " + data.error);
         }
       });
-  }, [filename, vaultFetch]);
+  }, [filename, vaultFetch, isCalibreBook]);
 
   // Migração de compatibilidade: comentários ancorados gravados antes do
   // painel unificado existir não têm o "¶id" (não dava pra ordená-los junto
@@ -692,14 +751,14 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   }, [filename]);
 
   useEffect(() => {
-    if (!filename) {
+    if (!filename || isCalibreBook) {
       setMentions([]);
       return;
     }
     vaultFetch(`/api/note/mentions?filename=${encodeURIComponent(filename)}`)
       .then((res) => res.json())
       .then((data) => setMentions(data.mentions ?? []));
-  }, [filename, vaultFetch]);
+  }, [filename, vaultFetch, isCalibreBook]);
 
   useEffect(() => {
     const view = editorViewRef.current;
@@ -817,7 +876,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     };
   }, [filename, vaultFetch]);
 
-  function getWikiLinkSuggestions(query: string): { label: string; filename: string }[] {
+  function getWikiLinkSuggestions(query: string): { label: string; filename: string; source?: "note" | "calibre" }[] {
     const q = query.trim().toLowerCase();
     const matches = noteTargets.filter((t) => {
       if (t.filename === filename) return false;
@@ -826,7 +885,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       if (t.filename.toLowerCase().includes(q)) return true;
       return t.aliases.some((a) => a.toLowerCase().includes(q));
     });
-    return matches.slice(0, 8).map((t) => ({ label: t.title, filename: t.filename }));
+    return matches.slice(0, 8).map((t) => ({ label: t.title, filename: t.filename, source: t.source }));
   }
 
   function confirmWikiLink(item: { label: string; filename: string }, range: { from: number; to: number }) {
@@ -1501,51 +1560,129 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
             {filename && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <input
-                    ref={titleInputRef}
-                    value={titleDraft}
-                    onChange={(e) => setTitleDraft(e.target.value)}
-                    onBlur={() => renameActiveNote(titleDraft)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === "Tab") {
-                        e.preventDefault();
-                        (e.target as HTMLInputElement).blur();
-                      }
-                    }}
-                    placeholder="Título da nota"
-                    style={{
-                      fontSize: "1.8em",
-                      fontWeight: "bold",
-                      background: "transparent",
-                      border: "none",
-                      outline: "none",
-                      color: "var(--foreground)",
-                      padding: 0,
-                      fontFamily: "inherit",
-                      flex: 1,
-                      minWidth: 0,
-                    }}
-                  />
-                  <button
-                    onClick={handleFavoriteToggle}
-                    className="toolbar-link"
-                    title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
-                    style={{
-                      background: "transparent",
-                      border: "none",
-                      padding: "0.2rem",
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      flexShrink: 0,
-                    }}
-                  >
-                    <StarIcon filled={isFavorite} />
-                  </button>
-                  <TagField tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />
+                  {isCalibreBook ? (
+                    <div
+                      style={{
+                        fontSize: "1.8em",
+                        fontWeight: "bold",
+                        color: "var(--foreground)",
+                        fontFamily: "inherit",
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {calibreBook?.title ?? "Carregando..."}
+                    </div>
+                  ) : (
+                    <input
+                      ref={titleInputRef}
+                      value={titleDraft}
+                      onChange={(e) => setTitleDraft(e.target.value)}
+                      onBlur={() => renameActiveNote(titleDraft)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === "Tab") {
+                          e.preventDefault();
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="Título da nota"
+                      style={{
+                        fontSize: "1.8em",
+                        fontWeight: "bold",
+                        background: "transparent",
+                        border: "none",
+                        outline: "none",
+                        color: "var(--foreground)",
+                        padding: 0,
+                        fontFamily: "inherit",
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                    />
+                  )}
+                  {!isCalibreBook && (
+                    <button
+                      onClick={handleFavoriteToggle}
+                      className="toolbar-link"
+                      title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        padding: "0.2rem",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <StarIcon filled={isFavorite} />
+                    </button>
+                  )}
+                  {!isCalibreBook && <TagField tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />}
+                  {!isCalibreBook && (
+                    <button
+                      onClick={(e) => handleCoverButtonClick(e.currentTarget.getBoundingClientRect())}
+                      className="toolbar-link"
+                      title={coverManualPath ? "Trocar ou remover capa" : "Adicionar capa"}
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        fontSize: "0.8rem",
+                        padding: "0.2rem 0.3rem",
+                        flexShrink: 0,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {coverManualPath ? "Capa ✓" : "+ capa"}
+                    </button>
+                  )}
                 </div>
 
-                {noteTags.length > 0 && (
+                {isCalibreBook && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+                    <span
+                      style={{
+                        padding: "0.15rem 0.5rem",
+                        borderRadius: "999px",
+                        border: "1px solid var(--panel-border)",
+                        color: "var(--text-muted)",
+                        fontSize: "0.75rem",
+                      }}
+                    >
+                      Biblioteca Calibre — somente leitura
+                    </span>
+                    {calibreBook && calibreBook.formats.length > 1 && (
+                      <div style={{ display: "flex", gap: "0.3rem" }}>
+                        {calibreBook.formats.map((fmt) => (
+                          <button
+                            key={fmt}
+                            onClick={() => onFilenameChange(`calibre:${calibreId}:${fmt}`)}
+                            className="toolbar-link"
+                            style={{
+                              padding: "0.2rem 0.55rem",
+                              borderRadius: "999px",
+                              border: "1px solid var(--panel-border)",
+                              background: fmt === calibreFormat ? "var(--panel-hover)" : "transparent",
+                              color: fmt === calibreFormat ? "var(--foreground)" : "var(--text-muted)",
+                              fontWeight: fmt === calibreFormat ? "bold" : "normal",
+                              cursor: "pointer",
+                              fontSize: "0.75rem",
+                            }}
+                          >
+                            {fmt}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!isCalibreBook && noteTags.length > 0 && (
                   <div style={{ marginTop: "0.4rem" }}>
                     <TagChips tags={noteTags} onChange={handleTagsChange} />
                   </div>
@@ -1680,9 +1817,6 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       ⋯
                     </button>
                   )}
-                  {contentType !== "book" && (
-                    <StatusDropdown status={studyStatus} contentType={contentType} onChange={handleStatusChange} />
-                  )}
                   {closable && (
                     <button
                       onClick={onClose}
@@ -1735,6 +1869,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       ? parseInt(activeViewerAnchor.value, 10) || undefined
                       : undefined
                   }
+                  sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
+                  linkLabel={isCalibreBook ? calibreBook?.title : undefined}
                 />
               )}
               {viewerKind === "epub" && (
@@ -1748,6 +1884,9 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       : undefined
                   }
                   onMarkerClick={handleEpubMarkerClick}
+                  sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
+                  linkLabel={isCalibreBook ? calibreBook?.title : undefined}
+                  calibreId={isCalibreBook ? calibreId ?? undefined : undefined}
                 />
               )}
             </div>
@@ -1806,7 +1945,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           )}
           </div>
 
-          {filename && (
+          {filename && !isCalibreBook && (
             <div style={{ maxWidth: "760px", width: "100%", margin: "0 auto" }}>
               <div style={{ marginTop: "1.5rem", borderTop: "1px solid var(--panel-border)", paddingTop: "1rem" }}>
                 <h3 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "var(--text-muted)" }}>Backlinks</h3>
@@ -1978,6 +2117,19 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         />
       )}
 
+      {coverMenuAnchor && (
+        <CoverMenu
+          x={coverMenuAnchor.x}
+          y={coverMenuAnchor.y}
+          onChange={() => {
+            setCoverMenuAnchor(null);
+            coverFileInputRef.current?.click();
+          }}
+          onRemove={handleRemoveCover}
+          onClose={() => setCoverMenuAnchor(null)}
+        />
+      )}
+
       {/* Painel de controles de imagem: flutuante, ancorado na própria imagem
           selecionada (posição vem do próprio clique, ver ImageWidget em
           livePreview.ts) — não mais fixo no topo da nota, que obrigava rolar
@@ -2009,6 +2161,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       {filename && (
         <BookCommentsPanel
           filename={filename}
+          calibreId={isCalibreBook ? calibreId ?? undefined : undefined}
           isMobile={isMobile}
           open={showBookComments}
           onClose={() => setShowBookComments(false)}
@@ -2179,7 +2332,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           open={showChat}
           onClose={() => setShowChat(false)}
           filename={filename}
-          noteTitle={stripMdExtension(filename)}
+          noteTitle={isCalibreBook ? calibreBook?.title ?? "" : stripMdExtension(filename)}
           getOwnContent={viewerKind === "epub" ? async () => (await epubViewerRef.current?.getFullText()) ?? "" : async () => content}
           getCurrentChapterContent={
             viewerKind === "epub" ? async () => (await epubViewerRef.current?.getCurrentChapterText()) ?? "" : undefined
@@ -2198,6 +2351,18 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           e.target.value = "";
           const view = editorViewRef.current;
           if (file && view) insertImageAt(view, view.state.selection.main.head, file);
+        }}
+      />
+
+      <input
+        ref={coverFileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) handleCoverFileSelected(file);
         }}
       />
     </div>

@@ -31,7 +31,7 @@ type Props = {
   notes: LibraryNote[];
   onBack: () => void;
   onOpenNote: (filename: string) => void;
-  onRenameNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
   onToggleFavorite: (filename: string) => void;
 };
@@ -78,7 +78,7 @@ export default function TagFocusPage({
             key={note.filename}
             note={note}
             onClick={() => onOpenNote(note.filename)}
-            onRename={() => onRenameNote(note.filename)}
+            onRename={(newTitle, onSettled) => onRenameNote(note.filename, newTitle, onSettled)}
             onDelete={() => onDeleteNote(note.filename)}
             isFavorite={note.isFavorite}
             onToggleFavorite={() => onToggleFavorite(note.filename)}

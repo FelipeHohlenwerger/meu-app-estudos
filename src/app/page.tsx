@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import GraphView, { type GraphNode, type GraphEdge } from "@/components/GraphView";
 import LibraryHome from "@/components/LibraryHome";
 import TagNoteList from "@/components/TagNoteList";
-import GroupedNoteList from "@/components/GroupedNoteList";
 import TagFocusPage from "@/components/TagFocusPage";
+import CalibreLibraryPage from "@/components/CalibreLibraryPage";
+import type { CalibreBook } from "@/lib/calibreLibrary";
 import { StarIcon, type LibraryNote } from "@/components/NoteCard";
 import { buildTagTree, filterTagTree, formatTagLabel, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
@@ -14,7 +15,7 @@ import ConfirmModal from "@/components/ConfirmModal";
 import ImportProgressModal from "@/components/ImportProgressModal";
 import ImportWebModal from "@/components/ImportWebModal";
 import { GRAPH_SPACE_BACKGROUND } from "@/lib/colors";
-import { STATUS_LABELS, matchesTypeFilter, CONTENT_TYPE_FILTER_OPTIONS, type ContentTypeFilter } from "@/lib/noteStatus";
+import { matchesTypeFilter, CONTENT_TYPE_FILTER_OPTIONS, type ContentTypeFilter } from "@/lib/noteStatus";
 import NotePanel, { type NotePanelHandle } from "@/components/NotePanel";
 import VaultSwitcher from "@/components/VaultSwitcher";
 import CreateVaultModal from "@/components/CreateVaultModal";
@@ -112,10 +113,24 @@ type HomeView =
   | { kind: "library" }
   | { kind: "tagList"; tag: string | null }
   | { kind: "tagFocus"; macroTag: string }
-  | { kind: "statusList"; status: string }
   | { kind: "recentList" }
   | { kind: "favoritesList" }
+  | { kind: "calibreLibrary" }
   | { kind: "editor" };
+
+// Formato padrão pra abrir um livro do Calibre com mais de um disponível —
+// EPUB primeiro (mesmo espírito de reflow/tema já usado pros EPUBs de
+// vault), senão o primeiro formato que existir.
+function calibreDefaultFormat(book: CalibreBook): string {
+  return book.formats.includes("EPUB") ? "EPUB" : (book.formats[0] ?? "EPUB");
+}
+
+// Pseudo-filename "calibre:<id>:<FORMAT>" — ver decisão de arquitetura em
+// NotePanel.tsx (isCalibreBook). Única função que constrói essa string, pra
+// nunca divergir entre os vários lugares que precisam abrir um livro.
+function calibrePseudoFilename(book: CalibreBook): string {
+  return `calibre:${book.id}:${calibreDefaultFormat(book)}`;
+}
 
 export default function Home() {
   // Vault ativo — ver src/lib/vaultContext.tsx. `activeVaultId` começa null
@@ -166,9 +181,19 @@ export default function Home() {
   // Aba ativa da sidebar (dentro do modo editor) — "Notas" (lista plana, por
   // título) ou "Tags" (árvore hierárquica, ver src/lib/tagTree.ts). A busca
   // abaixo é compartilhada pelas duas.
-  const [sidebarTab, setSidebarTab] = useState<"notes" | "tags">("notes");
+  const [sidebarTab, setSidebarTab] = useState<"notes" | "tags" | "calibre">("tags");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
+  // Modo de organização da aba "Calibre" da sidebar — EXCLUSIVO (troca a
+  // forma de ver a lista inteira), diferente dos 3 filtros combináveis da
+  // página cheia da galeria (CalibreLibraryPage).
+  const [calibreSidebarMode, setCalibreSidebarMode] = useState<"assunto" | "serie" | "autor">("assunto");
+  // Biblioteca Calibre — GLOBAL (não por vault, ao contrário de libraryNotes),
+  // carregada uma vez e recarregada periodicamente (a biblioteca pode estar
+  // sendo catalogada ativamente pelo Calibre em paralelo). Alimenta: aba
+  // "Calibre" da sidebar, card + página cheia da Homepage, e o autocomplete
+  // "[[" unificado (ver linkTargets abaixo).
+  const [calibreBooks, setCalibreBooks] = useState<CalibreBook[]>([]);
   // Filtro por tipo da aba "Tags" — escondido por padrão atrás do ícone de
   // livro ao lado da busca (usado com pouca frequência, mesmo espírito do
   // "⋯" do painel de imagem); não reseta ao trocar de aba, mesmo espírito de
@@ -182,7 +207,11 @@ export default function Home() {
   // navegador, o primeiro perde o foco, dispara onBlur, e cancela o rename sozinho.
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const [noteRowMenu, setNoteRowMenu] = useState<{ x: number; y: number; rowKey: string; filename: string } | null>(null);
+  const [noteRowMenu, setNoteRowMenu] = useState<{
+    triggerRect: { left: number; top: number; bottom: number };
+    rowKey: string;
+    filename: string;
+  } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ filename: string } | null>(null);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState<{ filenames: string[] } | null>(null);
   // Rastreia o clique anterior na sidebar pra distinguir "clique, espera, clique
@@ -321,6 +350,28 @@ export default function Home() {
   // olhando agora", já que com dois painéis não existe mais uma "activeNote" única.
   const focusedFilename = focusedPanel === "a" ? panelA : panelB;
 
+  // Alvos de link "[[" combinados: notas do vault + livros do Calibre (como
+  // pseudo-alvos "calibre:<id>:<FORMAT>") — mesmo mapa que já resolve por
+  // título, então nenhuma sintaxe nova de link é necessária (ver
+  // buildLinkTargetsMap em NotePanel.tsx). "source" só existe pro selo visual
+  // no autocomplete (WikiLinkMenu.tsx).
+  const linkTargets = useMemo(
+    () => [
+      ...noteTargets.map((t) => ({ ...t, source: "note" as const })),
+      ...calibreBooks.map((b) => ({
+        filename: calibrePseudoFilename(b),
+        title: b.title,
+        aliases: [] as string[],
+        source: "calibre" as const,
+      })),
+    ],
+    [noteTargets, calibreBooks]
+  );
+
+  function openCalibreBook(book: CalibreBook) {
+    openNoteInPanel(calibrePseudoFilename(book));
+  }
+
   // Salva a lista inteira de tags de uma nota (chamado pelo NotePanel a cada
   // adição/remoção de chip) e reflete a mudança na sidebar sem recarregar a
   // página inteira.
@@ -331,17 +382,6 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename, tags: nextTags }),
     }).then(() => refreshAllTags());
-  }
-
-  // Salva o status de estudo escolhido no dropdown do painel de controles e
-  // reflete a mudança na Homepage (seção "Progresso") sem recarregar a página.
-  function handleStatusChanged(filename: string, nextStatus: string) {
-    setLibraryNotes((prev) => prev.map((note) => (note.filename === filename ? { ...note, status: nextStatus } : note)));
-    vaultFetch("/api/note/status", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename, status: nextStatus }),
-    });
   }
 
   // Alterna favorito (estrela no card e no editor) — mesma fonte única
@@ -462,6 +502,65 @@ export default function Home() {
       (note) => note.tags.length === 0 && matchesTypeFilter(note, sidebarTypeFilter) && (!q || note.title.toLowerCase().includes(q))
     );
   }, [libraryNotes, sidebarSearch, sidebarTypeFilter]);
+
+  // Aba "Calibre" da sidebar: mesma busca compartilhada (título/autor, ao
+  // contrário da busca só-por-título das outras abas), filtrada ANTES de
+  // montar a árvore/agrupamentos abaixo — mesmo espírito de sidebarTagTree.
+  const sidebarCalibreFiltered = useMemo(() => {
+    const q = sidebarSearch.trim().toLowerCase();
+    if (!q) return calibreBooks;
+    return calibreBooks.filter((b) => b.title.toLowerCase().includes(q) || b.authors.some((a) => a.toLowerCase().includes(q)));
+  }, [calibreBooks, sidebarSearch]);
+
+  // Assunto: árvore hierárquica reaproveitando buildTagTree (genérico,
+  // opera só em [string-com-ponto, count][]) — o campo "assunto" do Calibre
+  // já usa o mesmo formato hierárquico com ponto das tags do app.
+  const sidebarCalibreSubjectTree = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const book of sidebarCalibreFiltered) {
+      for (const subject of book.subjects) counts.set(subject, (counts.get(subject) ?? 0) + 1);
+    }
+    return buildTagTree(Array.from(counts.entries()));
+  }, [sidebarCalibreFiltered]);
+
+  const calibreBooksBySubject = useMemo(() => {
+    const map = new Map<string, CalibreBook[]>();
+    for (const book of sidebarCalibreFiltered) {
+      for (const subject of book.subjects) {
+        const list = map.get(subject) ?? [];
+        list.push(book);
+        map.set(subject, list);
+      }
+    }
+    return map;
+  }, [sidebarCalibreFiltered]);
+
+  // Série: livros sem série cadastrada ficam de fora (sem grupo "Sem série").
+  const sidebarCalibreBySeries = useMemo(() => {
+    const map = new Map<string, CalibreBook[]>();
+    for (const book of sidebarCalibreFiltered) {
+      if (!book.series) continue;
+      const list = map.get(book.series) ?? [];
+      list.push(book);
+      map.set(book.series, list);
+    }
+    for (const list of map.values()) list.sort((a, b) => (a.seriesIndex ?? 0) - (b.seriesIndex ?? 0));
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [sidebarCalibreFiltered]);
+
+  // Autor: livro com mais de um autor aparece sob cada um deles.
+  const sidebarCalibreByAuthor = useMemo(() => {
+    const map = new Map<string, CalibreBook[]>();
+    for (const book of sidebarCalibreFiltered) {
+      for (const author of book.authors) {
+        const list = map.get(author) ?? [];
+        list.push(book);
+        map.set(author, list);
+      }
+    }
+    for (const list of map.values()) list.sort((a, b) => a.title.localeCompare(b.title));
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [sidebarCalibreFiltered]);
 
   function toggleTheme() {
     setTheme((prev) => {
@@ -621,6 +720,31 @@ export default function Home() {
       });
   }, []);
 
+  // Biblioteca Calibre: GLOBAL (não escopada a nenhum vault), buscada uma vez
+  // ao abrir o app e recarregada periodicamente (2 min) + ao voltar o foco
+  // pra aba/janela — a biblioteca pode estar sendo catalogada ativamente pelo
+  // Calibre em paralelo. Vazia se não houver caminho configurado (ver
+  // VaultSwitcher.tsx), sem erro nenhum.
+  function fetchCalibreBooks() {
+    fetch("/api/calibre/books")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.books) setCalibreBooks(data.books);
+      });
+  }
+  useEffect(() => {
+    fetchCalibreBooks();
+    const interval = setInterval(fetchCalibreBooks, 120_000);
+    function handleVisibility() {
+      if (document.visibilityState === "visible") fetchCalibreBooks();
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
+
   // Mantém o ImageWidget (livePreview.ts) sabendo qual vault está ativo — ver
   // comentário lá sobre por que isso não pode vir de um Contexto React.
   useEffect(() => {
@@ -721,15 +845,19 @@ export default function Home() {
     setFocusedPanel("a");
   }
 
-  // Renomeia uma nota a partir da sidebar — não necessariamente a nota aberta
-  // num painel. Se estiver aberta em A e/ou B, grava a edição pendente daquele
-  // painel ANTES de renomear (senão uma edição não salva pode se perder ou ser
-  // salva com o nome errado), e atualiza o painel pro novo nome depois.
-  async function renameSidebarNote(filename: string, newTitleRaw: string) {
+  // Núcleo compartilhado de renomear (via API) — usado tanto pelo rename
+  // inline da sidebar quanto pelo rename inline dos cards (Homepage/listas de
+  // tema/favoritos). Se a nota estiver aberta em A e/ou B, grava a edição
+  // pendente daquele painel ANTES de renomear (senão uma edição não salva
+  // pode se perder ou ser salva com o nome errado), e atualiza o painel pro
+  // novo nome depois. `onSettled` roda sempre no final (sucesso, erro, ou
+  // "nada mudou") — cada chamador usa isso só pra fechar seu próprio estado
+  // local de edição (renamingKey da sidebar vs. o estado interno do card).
+  async function performRename(filename: string, newTitleRaw: string, onSettled: () => void) {
     const trimmed = newTitleRaw.trim();
     const currentTitle = stripMdExtension(filename);
     if (!trimmed || trimmed === currentTitle) {
-      setRenamingKey(null);
+      onSettled();
       return;
     }
 
@@ -746,16 +874,29 @@ export default function Home() {
     const data = await res.json();
     if (!data.filename) {
       window.alert(data.error ?? "desconhecido");
-      setRenamingKey(null);
+      onSettled();
       return;
     }
 
     const newFilename: string = data.filename;
-    setRenamingKey(null);
+    onSettled();
     fetchNoteTargets();
     fetchLibraryData();
     if (isInA) setPanelA(newFilename);
     if (isInB) setPanelB(newFilename);
+  }
+
+  // Renomeia uma nota a partir da sidebar — não necessariamente a nota aberta
+  // num painel.
+  async function renameSidebarNote(filename: string, newTitleRaw: string) {
+    await performRename(filename, newTitleRaw, () => setRenamingKey(null));
+  }
+
+  // Renomeia uma nota a partir do rename inline de um card (Homepage/listas)
+  // — ver NoteCard.tsx, que já mantém seu PRÓPRIO estado local de "editando
+  // título" e só chama isso no commit (Enter/blur), com o texto final.
+  async function renameCardNote(filename: string, newTitle: string, onSettled: () => void) {
+    await performRename(filename, newTitle, onSettled);
   }
 
   // Só abre o modal de confirmação — a exclusão de verdade acontece em
@@ -817,14 +958,6 @@ export default function Home() {
     }
   }
 
-  // Renomear disparado a partir de um card na Homepage/lista de tag: abre a
-  // nota no painel certo e foca/seleciona o campo de título assim que ele
-  // estiver montado.
-  function handleRenameFromCard(filename: string) {
-    const target = openNoteInPanel(filename);
-    if (target === "a") panelARef.current?.focusTitle();
-    else panelBRef.current?.focusTitle();
-  }
 
   // Distingue "clique, espera, clique de novo" (entra em modo renomear) de um
   // duplo-clique rápido no mesmo item (deve só reabrir a nota, sem renomear).
@@ -920,7 +1053,7 @@ export default function Home() {
         <button
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
-            setNoteRowMenu({ x: rect.left, y: rect.bottom + 4, rowKey, filename: note.filename });
+            setNoteRowMenu({ triggerRect: { left: rect.left, top: rect.top, bottom: rect.bottom }, rowKey, filename: note.filename });
           }}
           className="toolbar-link"
           title="Opções"
@@ -996,6 +1129,153 @@ export default function Home() {
                 {matchingNotes.map((note) => (
                   <li key={note.filename} style={{ marginBottom: "0.3rem" }}>
                     {renderSidebarNoteRow(note, `${node.fullPath}::${note.filename}`, { indent: `${1.3 + depth * 0.9}rem` })}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Linha de um livro do Calibre na sidebar — versão bem mais simples de
+  // renderSidebarNoteRow (sem favorito/renomear/"...": livro do Calibre não
+  // tem nada disso no app, só abre pro visualizador).
+  function renderCalibreBookRow(book: CalibreBook, indent: string) {
+    const pseudoFilename = calibrePseudoFilename(book);
+    const isOpen = pseudoFilename === panelA || pseudoFilename === panelB;
+    return (
+      <button
+        onClick={() => {
+          if (isMobile) setMobileSidebarOpen(false);
+          openCalibreBook(book);
+        }}
+        style={{
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          padding: `0.4rem 0.5rem 0.4rem ${indent}`,
+          background: isOpen ? "var(--panel-hover)" : "transparent",
+          border: "none",
+          borderRadius: "4px",
+          cursor: "pointer",
+          color: "var(--foreground)",
+          fontSize: "0.85rem",
+          overflow: "hidden",
+        }}
+      >
+        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{book.title}</div>
+        {book.authors.length > 0 && (
+          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {book.authors.join(", ")}
+          </div>
+        )}
+      </button>
+    );
+  }
+
+  // Grupo expansível (Série/Autor) — mesmo visual/expand-collapse de
+  // renderTagTreeNode, mas achatado (sem filhos aninhados).
+  function renderCalibreGroup(key: string, label: string, books: CalibreBook[]) {
+    const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(key);
+    return (
+      <div key={key} style={{ marginBottom: "0.25rem" }}>
+        <button
+          onClick={() => toggleTagGroup(key)}
+          className="toolbar-link"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            width: "100%",
+            padding: "0.4rem 0.3rem",
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            borderRadius: "4px",
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span
+              style={{
+                display: "inline-block",
+                transition: "transform 0.15s ease",
+                transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                fontSize: "0.75rem",
+                flexShrink: 0,
+              }}
+            >
+              ›
+            </span>
+            {label}
+          </span>
+          <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{books.length}</span>
+        </button>
+        {isExpanded && (
+          <ul style={{ listStyle: "none", padding: 0, margin: "0.15rem 0 0.5rem 0" }}>
+            {books.map((book) => (
+              <li key={book.id} style={{ marginBottom: "0.3rem" }}>
+                {renderCalibreBookRow(book, "1.3rem")}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  // Árvore de Assunto — mesmo desenho recursivo de renderTagTreeNode, folhas
+  // mostram livros do Calibre em vez de notas.
+  function renderCalibreTreeNode(node: TagTreeNode, depth: number) {
+    const key = `calibre-subject::${node.fullPath}`;
+    const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(key);
+    const matchingBooks = isExpanded ? calibreBooksBySubject.get(node.fullPath) ?? [] : [];
+    return (
+      <div key={node.fullPath} style={{ marginBottom: "0.25rem" }}>
+        <button
+          onClick={() => toggleTagGroup(key)}
+          className="toolbar-link"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            width: "100%",
+            padding: `0.4rem 0.3rem 0.4rem ${0.3 + depth * 0.9}rem`,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            borderRadius: "4px",
+          }}
+        >
+          <span style={{ display: "flex", alignItems: "center", gap: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span
+              style={{
+                display: "inline-block",
+                transition: "transform 0.15s ease",
+                transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                fontSize: "0.75rem",
+                flexShrink: 0,
+              }}
+            >
+              ›
+            </span>
+            {formatTagLabel(node.name)}
+          </span>
+          <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{node.totalCount}</span>
+        </button>
+        {isExpanded && (
+          <>
+            {node.children.map((child) => renderCalibreTreeNode(child, depth + 1))}
+            {matchingBooks.length > 0 && (
+              <ul style={{ listStyle: "none", padding: 0, margin: "0.15rem 0 0.5rem 0" }}>
+                {matchingBooks.map((book) => (
+                  <li key={book.id} style={{ marginBottom: "0.3rem" }}>
+                    {renderCalibreBookRow(book, `${1.3 + depth * 0.9}rem`)}
                   </li>
                 ))}
               </ul>
@@ -1462,14 +1742,17 @@ export default function Home() {
         <LibraryHome
           notes={libraryNotes}
           onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
+          onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onViewTag={(tag) => setHomeView({ kind: "tagList", tag })}
           onViewTagFocus={(macroTag) => setHomeView({ kind: "tagFocus", macroTag })}
-          onViewStatus={(status) => setHomeView({ kind: "statusList", status })}
           onViewRecent={() => setHomeView({ kind: "recentList" })}
           onViewFavorites={() => setHomeView({ kind: "favoritesList" })}
           onToggleFavorite={toggleFavorite}
+          onCoverChanged={handleLibraryChanged}
+          calibreBooks={calibreBooks}
+          onOpenCalibreBook={openCalibreBook}
+          onViewCalibreLibrary={() => setHomeView({ kind: "calibreLibrary" })}
           onOpenNewNoteMenu={openNewNoteMenu}
           onFileDropped={handleFileSelected}
           onCreateBlank={handleCreateBlank}
@@ -1484,7 +1767,7 @@ export default function Home() {
           tag={homeView.tag}
           notes={libraryNotes.filter((n) => (homeView.tag ? n.tags.includes(homeView.tag) : n.tags.length === 0))}
           onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
+          onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
@@ -1499,21 +1782,8 @@ export default function Home() {
           )}
           onBack={() => setHomeView({ kind: "library" })}
           onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
+          onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
-          onToggleFavorite={toggleFavorite}
-        />
-      )}
-
-      {homeView.kind === "statusList" && (
-        <GroupedNoteList
-          heading={STATUS_LABELS[homeView.status] ?? homeView.status}
-          notes={libraryNotes.filter((n) => n.status === homeView.status)}
-          showTypeFilter
-          onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
-          onDeleteNote={requestDeleteNote}
-          onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
         />
       )}
@@ -1525,7 +1795,7 @@ export default function Home() {
           notes={[...libraryNotes].sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
           metaForNote={(note) => formatRelativeTime(note.lastActivityMs)}
           onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
+          onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
@@ -1539,11 +1809,15 @@ export default function Home() {
           showTypeFilter
           notes={[...libraryNotes].filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
           onOpenNote={openNoteInPanel}
-          onRenameNote={handleRenameFromCard}
+          onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
         />
+      )}
+
+      {homeView.kind === "calibreLibrary" && (
+        <CalibreLibraryPage books={calibreBooks} onBack={() => setHomeView({ kind: "library" })} onOpenBook={openCalibreBook} />
       )}
 
       {/* Conteúdo principal: notas + painel(éis) de nota */}
@@ -1590,7 +1864,7 @@ export default function Home() {
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.15rem" }}>
-            {(["notes", "tags"] as const).map((tab) => (
+            {(["notes", "tags", "calibre"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setSidebarTab(tab)}
@@ -1606,7 +1880,7 @@ export default function Home() {
                   background: sidebarTab === tab ? "var(--panel-hover)" : "transparent",
                 }}
               >
-                {tab === "notes" ? "Notas" : "Tags"}
+                {tab === "notes" ? "Notas" : tab === "tags" ? "Tags" : "Calibre"}
               </button>
             ))}
           </div>
@@ -1666,7 +1940,7 @@ export default function Home() {
             <input
               value={sidebarSearch}
               onChange={(e) => setSidebarSearch(e.target.value)}
-              placeholder={sidebarTab === "notes" ? "Buscar notas..." : "Buscar tags..."}
+              placeholder={sidebarTab === "notes" ? "Buscar notas..." : sidebarTab === "tags" ? "Buscar tags..." : "Buscar por título/autor..."}
               style={{
                 width: "100%",
                 padding: "0.4rem 0.5rem 0.4rem 1.8rem",
@@ -1700,6 +1974,34 @@ export default function Home() {
             </button>
           )}
         </div>
+
+        {sidebarTab === "calibre" && (
+          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+            {([
+              ["assunto", "Assunto"],
+              ["serie", "Série"],
+              ["autor", "Autor"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => setCalibreSidebarMode(value)}
+                className="toolbar-link"
+                style={{
+                  padding: "0.25rem 0.6rem",
+                  borderRadius: "999px",
+                  border: "1px solid var(--panel-border)",
+                  background: calibreSidebarMode === value ? "var(--panel-hover)" : "transparent",
+                  color: calibreSidebarMode === value ? "var(--foreground)" : "var(--text-muted)",
+                  fontWeight: calibreSidebarMode === value ? "bold" : "normal",
+                  cursor: "pointer",
+                  fontSize: "0.75rem",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {sidebarTab === "tags" && showSidebarTypeFilter && (
           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
@@ -1758,7 +2060,9 @@ export default function Home() {
 
             {/* "Sem tag" — não é um nó da árvore (não é uma tag de verdade),
                 fica de fora de sidebarTagTree e é renderizado à parte, sempre
-                por último, mesmo espírito do grupo "Sem tag" de antes das abas. */}
+                por último, mesmo espírito do grupo "Sem tag" de antes das abas.
+                Some por completo quando não há nenhuma nota sem tag. */}
+            {sidebarUntaggedNotes.length > 0 && (
             <div style={{ marginBottom: "0.25rem" }}>
               <button
                 onClick={() => toggleTagGroup(UNTAGGED_GROUP_KEY)}
@@ -1804,8 +2108,22 @@ export default function Home() {
                 </ul>
               )}
             </div>
+            )}
           </>
         )}
+
+        {sidebarTab === "calibre" &&
+          (calibreBooks.length === 0 ? (
+            <p style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+              Nenhum livro encontrado. Configure a biblioteca Calibre nas configurações do vault.
+            </p>
+          ) : calibreSidebarMode === "assunto" ? (
+            sidebarCalibreSubjectTree.map((node) => renderCalibreTreeNode(node, 0))
+          ) : calibreSidebarMode === "serie" ? (
+            sidebarCalibreBySeries.map(([series, books]) => renderCalibreGroup(`calibre-series::${series}`, series, books))
+          ) : (
+            sidebarCalibreByAuthor.map(([author, books]) => renderCalibreGroup(`calibre-author::${author}`, author, books))
+          ))}
       </aside>
 
       {/* Área principal: painel(éis) de nota */}
@@ -1819,15 +2137,15 @@ export default function Home() {
           isFontSizeOverridden={!!panelA && panelA in noteFontSizes}
           noteFont={noteFontFor(panelA)}
           isNoteFontOverridden={!!panelA && panelA in noteFontOverrides}
-          noteTargets={noteTargets}
+          noteTargets={linkTargets}
           allTags={allTags}
+          calibreBooks={calibreBooks}
           closable={splitMode}
           onClose={closePanelA}
           onFocus={() => setFocusedPanel("a")}
           onFilenameChange={(next) => setPanelA(next)}
           onLibraryChanged={handleLibraryChanged}
           onTagsChanged={handleTagsChanged}
-          onStatusChanged={handleStatusChanged}
           onFavoriteChanged={handleFavoriteChanged}
           onFontSizeChange={handleFontSizeChange}
           onToggleFontSizeOverride={handleToggleFontSizeOverride}
@@ -1847,15 +2165,15 @@ export default function Home() {
               isFontSizeOverridden={!!panelB && panelB in noteFontSizes}
               noteFont={noteFontFor(panelB)}
               isNoteFontOverridden={!!panelB && panelB in noteFontOverrides}
-              noteTargets={noteTargets}
+              noteTargets={linkTargets}
               allTags={allTags}
+              calibreBooks={calibreBooks}
               closable
               onClose={closePanelB}
               onFocus={() => setFocusedPanel("b")}
               onFilenameChange={(next) => setPanelB(next)}
               onLibraryChanged={handleLibraryChanged}
               onTagsChanged={handleTagsChanged}
-              onStatusChanged={handleStatusChanged}
               onFavoriteChanged={handleFavoriteChanged}
               onFontSizeChange={handleFontSizeChange}
               onToggleFontSizeOverride={handleToggleFontSizeOverride}
@@ -1943,8 +2261,7 @@ export default function Home() {
 
       {noteRowMenu && (
         <NoteRowMenu
-          x={noteRowMenu.x}
-          y={noteRowMenu.y}
+          triggerRect={noteRowMenu.triggerRect}
           onRename={() => {
             setRenameDraft(stripMdExtension(noteRowMenu.filename));
             setRenamingKey(noteRowMenu.rowKey);

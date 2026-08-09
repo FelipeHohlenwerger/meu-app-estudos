@@ -14,7 +14,7 @@ type Props = {
   // GroupedNoteList.tsx já usa pra Progresso.
   showTypeFilter?: boolean;
   onOpenNote: (filename: string) => void;
-  onRenameNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
   onDeleteMultiple: (filenames: string[]) => void;
   // Substitui o "N min de leitura" da meta por um texto calculado por nota —
@@ -163,7 +163,7 @@ export default function TagNoteList({
             note={note}
             metaOverride={metaForNote?.(note)}
             onClick={() => onOpenNote(note.filename)}
-            onRename={() => onRenameNote(note.filename)}
+            onRename={(newTitle, onSettled) => onRenameNote(note.filename, newTitle, onSettled)}
             onDelete={() => onDeleteNote(note.filename)}
             selectable
             selected={selected.has(note.filename)}

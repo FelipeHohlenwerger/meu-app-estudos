@@ -6,6 +6,13 @@ import { useVault } from "@/lib/vaultContext";
 type Props = {
   filename: string;
   initialPage?: number;
+  // Só passado pra livro do Calibre — substitui a URL vault-relativa que
+  // este componente construiria sozinho a partir de filename/vaultId.
+  sourceUrl?: string;
+  // Texto usado no "[[...]]" copiado pro clipboard — sem isso, usa filename
+  // (correto pra livro de vault; livro do Calibre usa o TÍTULO, já que a
+  // resolução de link pra ele é por título, não pelo pseudo-filename cru).
+  linkLabel?: string;
 };
 
 // PDF abre no visualizador nativo do navegador (mesmo que abre um link de PDF
@@ -18,18 +25,19 @@ type Props = {
 // novo link de página clicado pro MESMO arquivo (ex: key={initialPage}) — isso
 // remonta o componente inteiro (reiniciando `pageInput` a partir do novo
 // `initialPage`) em vez de precisar sincronizar via efeito.
-export default function PdfNativeViewer({ filename, initialPage }: Props) {
+export default function PdfNativeViewer({ filename, initialPage, sourceUrl, linkLabel }: Props) {
   const { vaultId } = useVault();
   const [pageInput, setPageInput] = useState(initialPage ?? 1);
   const [copied, setCopied] = useState(false);
 
   function handleCopyLink() {
-    navigator.clipboard.writeText(`[[${filename}#p${pageInput}]]`);
+    navigator.clipboard.writeText(`[[${linkLabel ?? filename}#p${pageInput}]]`);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
 
-  const src = `/api/note/file?filename=${encodeURIComponent(filename)}&vault=${encodeURIComponent(vaultId)}${initialPage ? `#page=${initialPage}` : ""}`;
+  const baseSrc = sourceUrl ?? `/api/note/file?filename=${encodeURIComponent(filename)}&vault=${encodeURIComponent(vaultId)}`;
+  const src = `${baseSrc}${initialPage ? `#page=${initialPage}` : ""}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, minWidth: 0, height: "100%", width: "100%" }}>

@@ -10,18 +10,6 @@ export type ContentType = "book" | "note";
 export const BOOK_STATUS_ORDER = ["nao_iniciado", "lendo", "lido", "revisando", "revisado", "abandonei"];
 export const NOTE_STATUS_ORDER = ["rascunho", "em_desenvolvimento", "finalizada"];
 
-export const STATUS_LABELS: Record<string, string> = {
-  nao_iniciado: "Não iniciei",
-  lendo: "Lendo",
-  lido: "Lido",
-  revisando: "Revisando",
-  revisado: "Revisado",
-  abandonei: "Abandonei",
-  rascunho: "Rascunho",
-  em_desenvolvimento: "Em desenvolvimento",
-  finalizada: "Finalizada",
-};
-
 // Livro/artigo recém-importado começa "não iniciei" (ainda não foi aberto pra
 // leitura) — antes de "abandonei"/"não iniciei" existirem como estágios
 // próprios, o padrão era "lendo" (assumia leitura imediata).

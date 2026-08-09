@@ -1,15 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import NoteRowMenu from "@/components/NoteRowMenu";
-import { STATUS_COLORS } from "@/lib/colors";
-import { STATUS_LABELS, defaultStatusFor, libraryItemKind, type LibraryItemKind } from "@/lib/noteStatus";
+import CoverMenu from "@/components/CoverMenu";
+import { uploadAndSetCover, removeCover } from "@/lib/coverActions";
+import { libraryItemKind, type LibraryItemKind } from "@/lib/noteStatus";
+import { useVault } from "@/lib/vaultContext";
 // Fonte canônica em src/lib/vaultIndex.ts — reexportado aqui só pra não
 // quebrar os call sites que já importam LibraryNote a partir deste arquivo
 // (ex: page.tsx).
 import type { LibraryNote } from "@/lib/vaultIndex";
 
-export { STATUS_COLORS, STATUS_LABELS };
 export type { LibraryNote };
 
 const WORDS_PER_MINUTE = 200;
@@ -29,12 +30,12 @@ function MoreIcon() {
   );
 }
 
-// Ícone pequeno de tipo (livro/artigo/nota) — diferenciação visual rápida em
-// qualquer lista de cards (Homepage, Progresso, aba "Tags" da sidebar). Usa
+// Ícone de tipo (livro/artigo/nota) — usado grande, centralizado na faixa de
+// imagem, quando a nota não tem capa (automática nem manual). Usa
 // libraryItemKind (src/lib/noteStatus.ts), que desdobra contentType="book" em
 // "book" (PDF/EPUB de verdade) e "article" (.md com "fonte:").
-function TypeIcon({ kind }: { kind: LibraryItemKind }) {
-  const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+function TypeIcon({ kind, size = 13 }: { kind: LibraryItemKind; size?: number }) {
+  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   if (kind === "book") {
     return (
       <svg {...common}>
@@ -59,6 +60,17 @@ function TypeIcon({ kind }: { kind: LibraryItemKind }) {
   );
 }
 
+// Ícone de link — usado no lugar do preview de texto quando a nota é
+// classificada como "nota-índice" (ver isIndexNote em vaultIndex.ts).
+function LinkIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  );
+}
+
 export function StarIcon({ filled }: { filled: boolean }) {
   return (
     <svg
@@ -79,18 +91,43 @@ export function StarIcon({ filled }: { filled: boolean }) {
 type Props = {
   note: LibraryNote;
   onClick: () => void;
-  onRename?: () => void;
+  // Renomear é EDIÇÃO INLINE no próprio card (nunca navega pra nota) — ver
+  // isRenaming abaixo. Chamado só no COMMIT (Enter/blur com texto novo), com
+  // o texto final e um callback pra fechar o modo de edição quando a
+  // chamada à API terminar (sucesso ou erro) — mesmo padrão do rename
+  // inline da sidebar em page.tsx (renamingKey), só que o estado de "estou
+  // editando" mora aqui, local a cada card, não numa chave global — assim
+  // a MESMA nota podendo aparecer em duas seções da Homepage ao mesmo tempo
+  // (ex: Favoritos + um tema) nunca vira dois inputs simultâneos sem querer.
+  onRename?: (newTitle: string, onSettled: () => void) => void;
   onDelete?: () => void;
   selectable?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
-  // Substitui o segundo segmento da meta ("· {readingTimeLabel}") por um
-  // texto pronto — usado pela seção "Editados recentemente" da Homepage pra
-  // mostrar tempo relativo ("há 12 min") no lugar do tempo de leitura, sem
-  // afetar nenhuma outra seção (que continua sem passar esse prop).
+  // Substitui a meta do rodapé (tempo de leitura) por um texto pronto — usado
+  // pela seção "Editados recentemente" da Homepage pra mostrar tempo relativo
+  // ("há 12 min") no lugar do tempo de leitura, sem afetar nenhuma outra seção
+  // (que continua sem passar esse prop).
   metaOverride?: string;
   isFavorite: boolean;
   onToggleFavorite: () => void;
+  // Chamado depois de adicionar/trocar/remover a capa pelo menu "..." —
+  // quem usa o card decide como refletir isso (ex: refetch da biblioteca).
+  onCoverChanged?: () => void;
+};
+
+// Botões flutuantes (favorito/opções) sobre a faixa de imagem — precisam de
+// contraste tanto sobre uma foto quanto sobre o fundo liso do placeholder de
+// tipo, daí o fundo semi-transparente (não existia quando ficavam sobre o
+// corpo liso do card, antes do redesenho).
+const overlayButtonStyle: React.CSSProperties = {
+  padding: "0.3rem",
+  border: "none",
+  borderRadius: "50%",
+  cursor: "pointer",
+  background: "rgba(0,0,0,0.45)",
+  display: "flex",
+  alignItems: "center",
 };
 
 export default function NoteCard({
@@ -104,178 +141,278 @@ export default function NoteCard({
   metaOverride,
   isFavorite,
   onToggleFavorite,
+  onCoverChanged,
 }: Props) {
-  const fallbackStatus = defaultStatusFor(note.contentType);
-  const statusColor = STATUS_COLORS[note.status] ?? STATUS_COLORS[fallbackStatus];
-  const statusLabel = STATUS_LABELS[note.status] ?? STATUS_LABELS[fallbackStatus];
+  const { vaultId, vaultFetch } = useVault();
   const itemKind = libraryItemKind(note.filename, note.contentType);
-  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ left: number; top: number; bottom: number } | null>(null);
+  const [coverMenuAnchor, setCoverMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const coverFileInputRef = useRef<HTMLInputElement>(null);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState(note.title);
   const showMenu = onRename && onDelete;
+
+  function commitRename() {
+    const trimmed = renameDraft.trim();
+    if (!trimmed || trimmed === note.title) {
+      setIsRenaming(false);
+      return;
+    }
+    onRename?.(trimmed, () => setIsRenaming(false));
+  }
+
+  function handleAddCoverClick() {
+    if (note.coverManualPath) {
+      setCoverMenuAnchor({ x: menuAnchor?.left ?? 0, y: menuAnchor?.bottom ?? 0 });
+    } else {
+      coverFileInputRef.current?.click();
+    }
+  }
+
+  async function handleCoverFileSelected(file: File) {
+    const path = await uploadAndSetCover(vaultFetch, note.filename, file);
+    if (path) onCoverChanged?.();
+  }
+
+  function handleRemoveCover() {
+    setCoverMenuAnchor(null);
+    removeCover(vaultFetch, note.filename).then(() => onCoverChanged?.());
+  }
+
+  const coverUrl = note.coverPath
+    ? /^https?:\/\//i.test(note.coverPath)
+      ? note.coverPath
+      : `/api/attachments/${encodeURIComponent(note.coverPath.split("/").pop() ?? note.coverPath)}?vault=${encodeURIComponent(vaultId)}`
+    : null;
 
   return (
     <div
-      onClick={onClick}
+      onClick={() => {
+        if (!isRenaming) onClick();
+      }}
       className="note-card"
       style={{
         border: selected ? "1px solid #2f7fd6" : "1px solid var(--panel-border)",
         borderRadius: "var(--radius)",
-        padding: "1rem",
         cursor: "pointer",
         display: "flex",
         flexDirection: "column",
-        gap: "0.4rem",
         position: "relative",
+        overflow: "hidden",
         background: selected ? "var(--panel-hover)" : undefined,
       }}
     >
-      {selectable && (
-        <input
-          type="checkbox"
-          checked={!!selected}
-          onClick={(e) => e.stopPropagation()}
-          onChange={() => onToggleSelect?.()}
-          title="Selecionar nota"
-          style={{
-            position: "absolute",
-            top: "0.6rem",
-            left: "0.6rem",
-            width: "16px",
-            height: "16px",
-            cursor: "pointer",
-          }}
-        />
-      )}
+      {/* Faixa de imagem — 16:10, largura inteira do card. Capa (manual tem
+          prioridade sobre automática, já resolvido em note.coverPath) cortada
+          pra preencher sem distorcer; sem capa, ícone de tipo centralizado
+          mantendo a mesma altura reservada — card nunca varia de altura por
+          causa disso.
 
-      <div style={{ position: "absolute", top: "0.5rem", right: "0.5rem", display: "flex", alignItems: "center", gap: "0.1rem" }}>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleFavorite();
-          }}
-          className="toolbar-link"
-          title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
-          style={{
-            padding: "0.3rem",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer",
-            background: "transparent",
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          <StarIcon filled={isFavorite} />
-        </button>
+          img/ícone são posicionados ABSOLUTE (inset:0) dentro dessa faixa,
+          nunca no fluxo flex normal — um <img> com height:100% DENTRO de um
+          item flex cujo próprio tamanho vem de aspect-ratio cria uma
+          dependência circular (altura do pai depende do aspect-ratio, que
+          por sua vez "espera" o filho) que faz alguns browsers IGNORAREM o
+          aspect-ratio e usarem a altura intrínseca da imagem em vez da
+          calculada — foi o bug real encontrado (faixa de 218px em vez de
+          137.5px só quando havia capa). Elemento absolute é tirado do fluxo,
+          então o tamanho da faixa nunca depende dele. */}
+      <div
+        style={{
+          width: "100%",
+          aspectRatio: "16 / 10",
+          flexShrink: 0,
+          position: "relative",
+          overflow: "hidden",
+          background: "var(--panel-hover)",
+          color: "var(--text-muted)",
+        }}
+      >
+        {coverUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={coverUrl} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <TypeIcon kind={itemKind} size={30} />
+          </div>
+        )}
 
-        {showMenu && (
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => onToggleSelect?.()}
+            title="Selecionar nota"
+            style={{
+              position: "absolute",
+              top: "0.5rem",
+              left: "0.5rem",
+              width: "16px",
+              height: "16px",
+              cursor: "pointer",
+            }}
+          />
+        )}
+
+        <div style={{ position: "absolute", top: "0.4rem", right: "0.4rem", display: "flex", alignItems: "center", gap: "0.25rem" }}>
           <button
             onClick={(e) => {
               e.stopPropagation();
-              const rect = e.currentTarget.getBoundingClientRect();
-              setMenuAnchor({ x: rect.right - 140, y: rect.bottom + 4 });
+              onToggleFavorite();
             }}
             className="toolbar-link"
-            title="Opções"
-            style={{
-              padding: "0.3rem",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-              color: "var(--text-muted)",
-              background: "transparent",
-              display: "flex",
-              alignItems: "center",
-            }}
+            title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
+            style={overlayButtonStyle}
           >
-            <MoreIcon />
+            <StarIcon filled={isFavorite} />
           </button>
-        )}
+
+          {showMenu && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenuAnchor({ left: rect.right - 140, top: rect.top, bottom: rect.bottom });
+              }}
+              className="toolbar-link"
+              title="Opções"
+              style={{ ...overlayButtonStyle, color: "white" }}
+            >
+              <MoreIcon />
+            </button>
+          )}
+        </div>
       </div>
 
       {menuAnchor && (
         <NoteRowMenu
-          x={menuAnchor.x}
-          y={menuAnchor.y}
+          triggerRect={menuAnchor}
           onOpen={() => {
             setMenuAnchor(null);
             onClick();
           }}
           onRename={() => {
             setMenuAnchor(null);
-            onRename?.();
+            setRenameDraft(note.title);
+            setIsRenaming(true);
           }}
           onDelete={() => {
             setMenuAnchor(null);
             onDelete?.();
           }}
+          onAddCover={() => {
+            setMenuAnchor(null);
+            handleAddCoverClick();
+          }}
           onClose={() => setMenuAnchor(null)}
         />
       )}
 
-      <div
-        className="note-card-title"
-        style={{
-          fontWeight: "bold",
-          paddingRight: showMenu ? "2.7rem" : "1.5rem",
-          paddingLeft: selectable ? "1.5rem" : 0,
-          display: "flex",
-          alignItems: "center",
-          gap: "0.35rem",
+      {coverMenuAnchor && (
+        <CoverMenu
+          x={coverMenuAnchor.x}
+          y={coverMenuAnchor.y}
+          onChange={() => {
+            setCoverMenuAnchor(null);
+            coverFileInputRef.current?.click();
+          }}
+          onRemove={handleRemoveCover}
+          onClose={() => setCoverMenuAnchor(null)}
+        />
+      )}
+
+      <input
+        ref={coverFileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) handleCoverFileSelected(file);
         }}
-      >
-        <span style={{ color: "var(--text-muted)", display: "inline-flex", flexShrink: 0 }} title={itemKind === "book" ? "Livro" : itemKind === "article" ? "Artigo" : "Nota"}>
-          <TypeIcon kind={itemKind} />
-        </span>
-        {note.title}
-      </div>
-      {/* Sempre renderizado, altura fixa em 2 linhas (clamp) mesmo sem resumo
-          — Favoritos e Editados recentemente são duas grades SEPARADAS lado
-          a lado (CardRow), então o "stretch" automático de linha do CSS Grid
-          não ajuda sozinho: sem isso, uma nota sem resumo (ex: começa só com
-          imagem, ver extractSummary em vaultIndex.ts) ou com resumo curto
-          fica visivelmente mais baixa que as vizinhas com resumo mais longo.
-          Resumo mais longo que 2 linhas trunca (mesmo texto já cortado em
-          ~80 caracteres por extractSummary, então isso raramente aciona). */}
-      <p
-        style={{
-          fontSize: "0.85rem",
-          margin: 0,
-          color: "var(--foreground)",
-          lineHeight: 1.3,
-          minHeight: "2.6em",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical",
-          overflow: "hidden",
-        }}
-      >
-        {note.summary || " "}
-      </p>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "6px",
-          fontSize: "0.75rem",
-          color: "var(--text-muted)",
-        }}
-      >
-        {note.contentType === "note" && (
-          <span
+      />
+
+      {/* Corpo — altura fixa por construção (título em até 2 linhas + preview
+          em 1 linha + rodapé, cada um com clamp/minHeight reservado), igual
+          com ou sem capa, título curto ou longo. */}
+      <div style={{ padding: "0.75rem 1rem", display: "flex", flexDirection: "column", gap: "0.3rem", flex: 1 }}>
+        {isRenaming ? (
+          <input
+            autoFocus
+            value={renameDraft}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setRenameDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                (e.target as HTMLInputElement).blur();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setIsRenaming(false);
+              }
+            }}
             style={{
-              width: "6px",
-              height: "6px",
-              borderRadius: "50%",
-              background: statusColor,
-              display: "inline-block",
-              flexShrink: 0,
+              fontWeight: "bold",
+              lineHeight: 1.3,
+              minHeight: "2.6em",
+              background: "var(--panel-bg)",
+              border: "1px solid var(--accent)",
+              borderRadius: "4px",
+              color: "var(--foreground)",
+              padding: "0 0.3rem",
+              fontFamily: "inherit",
+              fontSize: "inherit",
+              width: "100%",
+              boxSizing: "border-box",
             }}
           />
+        ) : (
+          <div
+            className="note-card-title"
+            style={{
+              fontWeight: "bold",
+              lineHeight: 1.3,
+              minHeight: "2.6em",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {note.title}
+          </div>
         )}
-        <span>
-          {note.contentType === "note" ? `${statusLabel} · ` : ""}
+
+        {note.isIndexNote ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.8rem", color: "var(--text-muted)", minHeight: "1.3em" }}>
+            <LinkIcon />
+            {note.linkedNotesCount} {note.linkedNotesCount === 1 ? "nota vinculada" : "notas vinculadas"}
+          </div>
+        ) : (
+          <p
+            style={{
+              fontSize: "0.85rem",
+              margin: 0,
+              color: "var(--foreground)",
+              lineHeight: 1.3,
+              minHeight: "1.3em",
+              display: "-webkit-box",
+              WebkitLineClamp: 1,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {note.summary || " "}
+          </p>
+        )}
+
+        <div style={{ marginTop: "auto", fontSize: "0.75rem", color: "var(--text-muted)" }}>
           {metaOverride ?? readingTimeLabel(note.wordCount)}
-        </span>
+        </div>
       </div>
     </div>
   );
