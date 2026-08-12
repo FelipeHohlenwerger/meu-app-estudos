@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFileSync } from "fs";
-import { getCalibreFilePath } from "@/lib/calibreLibrary";
+import { getCalibreFilePath, isCalibreBusyError } from "@/lib/calibreLibrary";
 
 const MIME_TYPES: Record<string, string> = {
   PDF: "application/pdf",
@@ -22,13 +22,21 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
     return NextResponse.json({ error: "Formato não suportado" }, { status: 400 });
   }
 
-  const filePath = getCalibreFilePath(bookId, format);
-  if (!filePath) {
-    return NextResponse.json({ error: "Arquivo não encontrado" }, { status: 404 });
-  }
+  try {
+    const filePath = await getCalibreFilePath(bookId, format);
+    if (!filePath) {
+      return NextResponse.json({ error: "Arquivo não encontrado" }, { status: 404 });
+    }
 
-  const data = readFileSync(filePath);
-  return new NextResponse(new Uint8Array(data), {
-    headers: { "Content-Type": contentType, "Cache-Control": "no-cache" },
-  });
+    const data = readFileSync(filePath);
+    return new NextResponse(new Uint8Array(data), {
+      headers: { "Content-Type": contentType, "Cache-Control": "no-cache" },
+    });
+  } catch (error) {
+    console.error(`[api/calibre/file/${bookId}] falha ao ler arquivo — User-Agent:`, request.headers.get("user-agent"), error);
+    return NextResponse.json(
+      { error: isCalibreBusyError(error) ? "Biblioteca Calibre ocupada" : "Não foi possível ler o arquivo", code: isCalibreBusyError(error) ? "busy" : "error" },
+      { status: 500 }
+    );
+  }
 }

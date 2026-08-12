@@ -20,29 +20,78 @@ export type CalibreBook = {
 
 // Abre o metadata.db em modo SOMENTE LEITURA — o Calibre pode estar aberto e
 // editando ao mesmo tempo, então nunca escrevemos aqui. PRAGMA busy_timeout
-// faz o SQLite tentar de novo sozinho por até 3s se o banco estiver ocupado
-// nesse instante, em vez de lançar "database is locked" na primeira tentativa.
+// faz o SQLite tentar de novo sozinho (nesta própria conexão) se o banco
+// estiver ocupado nesse instante, em vez de lançar "database is locked" na
+// primeira tentativa. Vale tanto para journal_mode=delete (lock exclusivo
+// breve na hora do commit) quanto para WAL (lock de checkpoint) — o erro que
+// o SQLite lança é o mesmo (SQLITE_BUSY/SQLITE_LOCKED) nos dois casos, então
+// o mesmo tratamento cobre ambos sem precisar detectar o modo do journal.
+// Mantido curto (800ms): node:sqlite é síncrono, então esse tempo bloqueia a
+// única thread do Node por completo (nenhuma outra rota da API responde
+// nesse meio-tempo) — cada tentativa fica curta de propósito, e é a camada
+// de retry abaixo (com espera assíncrona entre tentativas) que cobre locks
+// mais longos sem travar o resto do app.
 function openReadOnly(dbPath: string): DatabaseSync {
   const conn = new DatabaseSync(dbPath, { readOnly: true, open: true });
-  conn.exec("PRAGMA busy_timeout = 3000");
+  conn.exec("PRAGMA busy_timeout = 800");
   return conn;
 }
+
+// SQLITE_BUSY (banco momentaneamente travado por outro processo escrevendo —
+// aqui, o próprio Calibre catalogando) e SQLITE_LOCKED (conflito de lock
+// dentro do mesmo processo) são os únicos casos em que vale tentar de novo;
+// qualquer outro erro (permissão, arquivo corrompido, schema inesperado) não
+// se resolve esperando, então propaga na hora.
+function isRetryableBusyError(err: unknown): boolean {
+  const e = err as { code?: string; errcode?: number } | null | undefined;
+  return e?.code === "ERR_SQLITE_ERROR" && (e.errcode === 5 || e.errcode === 6);
+}
+
+export function isCalibreBusyError(err: unknown): boolean {
+  return isRetryableBusyError(err);
+}
+
+function sleepAsync(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RETRY_DELAYS_MS = [300, 700, 1200];
 
 // Nenhuma conexão fica em cache — a config pode mudar, e o banco é escrito
 // por fora (pelo próprio Calibre) a qualquer momento; abrir/fechar por
 // chamada é simples e correto, dado o tamanho típico de uma biblioteca
-// pessoal.
-function withDb<T>(fn: (conn: DatabaseSync, libraryPath: string) => T): T | null {
+// pessoal. Em cima de cada busy_timeout individual (800ms, síncrono — ver
+// openReadOnly), tenta de novo com uma conexão nova até 3 vezes antes de
+// desistir, cobrindo o caso do Calibre segurando um lock mais longo que um
+// único busy_timeout (ex: importação em lote, reconstrução de metadados).
+// A espera ENTRE tentativas é assíncrona (setTimeout, não um sleep
+// bloqueante) — testado e confirmado que um sleep síncrono aqui (ex:
+// Atomics.wait) prende a thread única do Node por inteiro, deixando o
+// servidor inteiro sem responder a QUALQUER rota (não só as do Calibre)
+// durante toda a espera; com espera assíncrona, o event loop fica livre pra
+// atender outras requisições entre uma tentativa e outra.
+async function withDb<T>(fn: (conn: DatabaseSync, libraryPath: string) => T): Promise<T | null> {
   const libraryPath = getCalibreLibraryPath();
   if (!libraryPath) return null;
   const dbPath = path.join(libraryPath, "metadata.db");
   if (!existsSync(dbPath)) return null;
 
-  const conn = openReadOnly(dbPath);
-  try {
-    return fn(conn, libraryPath);
-  } finally {
-    conn.close();
+  for (let attempt = 0; ; attempt++) {
+    const conn = openReadOnly(dbPath);
+    try {
+      return fn(conn, libraryPath);
+    } catch (err) {
+      if (!isRetryableBusyError(err) || attempt >= RETRY_DELAYS_MS.length) {
+        console.error(`[calibre] falha ao ler metadata.db (tentativa ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}):`, err);
+        throw err;
+      }
+      console.warn(
+        `[calibre] metadata.db ocupado (tentativa ${attempt + 1}/${RETRY_DELAYS_MS.length + 1}), tentando de novo em ${RETRY_DELAYS_MS[attempt]}ms`
+      );
+      await sleepAsync(RETRY_DELAYS_MS[attempt]);
+    } finally {
+      conn.close();
+    }
   }
 }
 
@@ -154,17 +203,17 @@ function loadBooksFlat(conn: DatabaseSync): CalibreBook[] {
   }));
 }
 
-export function listCalibreBooks(): CalibreBook[] {
-  return withDb((conn) => loadBooksFlat(conn)) ?? [];
+export async function listCalibreBooks(): Promise<CalibreBook[]> {
+  return (await withDb((conn) => loadBooksFlat(conn))) ?? [];
 }
 
-export function getCalibreBookById(id: number): CalibreBook | null {
-  return withDb((conn) => loadBooksFlat(conn).find((b) => b.id === id) ?? null) ?? null;
+export async function getCalibreBookById(id: number): Promise<CalibreBook | null> {
+  return (await withDb((conn) => loadBooksFlat(conn).find((b) => b.id === id) ?? null)) ?? null;
 }
 
 // Caminho absoluto da capa (cover.jpg) de um livro — null se a config não
 // estiver definida, o livro não existir, ou não houver capa.
-export function getCalibreCoverPath(id: number): string | null {
+export async function getCalibreCoverPath(id: number): Promise<string | null> {
   return withDb((conn, libraryPath) => {
     const row = conn.prepare("SELECT path, has_cover FROM books WHERE id = ?").get(id) as
       | { path: string; has_cover: number }
@@ -177,7 +226,7 @@ export function getCalibreCoverPath(id: number): string | null {
 
 // Caminho absoluto do arquivo de um formato específico do livro (ex: EPUB,
 // PDF) — null se não existir esse formato pra esse livro.
-export function getCalibreFilePath(id: number, format: string): string | null {
+export async function getCalibreFilePath(id: number, format: string): Promise<string | null> {
   return withDb((conn, libraryPath) => {
     const bookRow = conn.prepare("SELECT path FROM books WHERE id = ?").get(id) as { path: string } | undefined;
     if (!bookRow) return null;

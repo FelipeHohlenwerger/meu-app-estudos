@@ -5,7 +5,7 @@ import NoteCard, { type LibraryNote } from "@/components/NoteCard";
 import CalibreBookCard from "@/components/CalibreBookCard";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { formatRelativeTime } from "@/lib/relativeTime";
-import { formatTagLabel } from "@/lib/tagTree";
+import { formatTagLabel, normalizeTagKey } from "@/lib/tagTree";
 
 type Props = {
   notes: LibraryNote[];
@@ -25,6 +25,10 @@ type Props = {
   // que leva pra página cheia da galeria. Ausente/vazia quando não há
   // biblioteca configurada, o card inteiro some.
   calibreBooks: CalibreBook[];
+  // Erro da última busca da biblioteca Calibre (ver page.tsx) — sem isso, uma
+  // falha no servidor e "sem biblioteca configurada" pareciam a mesma coisa
+  // (card some em silêncio nos dois casos).
+  calibreError: string | null;
   onOpenCalibreBook: (book: CalibreBook) => void;
   onViewCalibreLibrary: () => void;
   onOpenNewNoteMenu: (rect: DOMRect, direction?: "down-right" | "up-left") => void;
@@ -274,6 +278,7 @@ export default function LibraryHome({
   onToggleFavorite,
   onCoverChanged,
   calibreBooks,
+  calibreError,
   onOpenCalibreBook,
   onViewCalibreLibrary,
   onOpenNewNoteMenu,
@@ -293,9 +298,16 @@ export default function LibraryHome({
   // aparece em cada seção correspondente — mesmo espírito de antes pra tags
   // distintas. Detalhe por subtema fica na página de foco (TagFocusPage),
   // acessível só clicando no nome da seção.
+  // Chave normalizada (ver normalizeTagKey em tagTree.ts) — sem isso,
+  // "história" e "História" (mesma tag digitada com caixa diferente em notas
+  // distintas) viravam duas seções "História" separadas na Homepage, cada
+  // uma com sua própria contagem parcial (bug real encontrado). O valor
+  // guardado no Map já é a forma normalizada (minúscula) — serve tanto pra
+  // formatTagLabel (exibição) quanto pra onViewTagFocus (navegação), que por
+  // sua vez espera receber sempre a forma normalizada como tagPath.
   const macroTagMap = new Map<string, LibraryNote[]>();
   for (const note of notes) {
-    const macros = new Set(note.tags.map((t) => t.split(".")[0]));
+    const macros = new Set(note.tags.map((t) => normalizeTagKey(t.split(".")[0])));
     for (const macro of macros) {
       const list = macroTagMap.get(macro) ?? [];
       list.push(note);
@@ -456,24 +468,47 @@ export default function LibraryHome({
         </section>
       ))}
 
-      <section style={sectionDividerStyle}>
-        <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
-          Sem categoria{" "}
-          <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
-            ({untaggedNotes.length} {untaggedNotes.length === 1 ? "nota" : "notas"})
-          </span>
-        </h2>
-        <SectionGrid
-          notes={untaggedNotes}
-          onOpenNote={onOpenNote}
-          onRenameNote={onRenameNote}
-          onDeleteNote={onDeleteNote}
-          onViewMore={() => onViewTag(null)}
-          onToggleFavorite={onToggleFavorite}
-          onCoverChanged={onCoverChanged}
-        />
-      </section>
+      {/* Mesma regra já aplicada na sidebar (grupo "Sem tag", ver page.tsx) —
+          some por completo quando não há nenhuma nota sem tag, em vez de
+          mostrar uma seção vazia "Sem categoria (0 notas)". */}
+      {untaggedNotes.length > 0 && (
+        <section style={sectionDividerStyle}>
+          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
+            Sem categoria{" "}
+            <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
+              ({untaggedNotes.length} {untaggedNotes.length === 1 ? "nota" : "notas"})
+            </span>
+          </h2>
+          <SectionGrid
+            notes={untaggedNotes}
+            onOpenNote={onOpenNote}
+            onRenameNote={onRenameNote}
+            onDeleteNote={onDeleteNote}
+            onViewMore={() => onViewTag(null)}
+            onToggleFavorite={onToggleFavorite}
+            onCoverChanged={onCoverChanged}
+          />
+        </section>
+      )}
       </>
+      )}
+
+      {calibreError && (
+        <section style={sectionDividerStyle}>
+          <div
+            style={{
+              padding: "0.75rem 1rem",
+              borderRadius: "6px",
+              border: "1px solid var(--danger, #c0392b)",
+              background: "var(--panel-hover)",
+              color: "var(--danger, #c0392b)",
+              fontSize: "0.85rem",
+              lineHeight: 1.4,
+            }}
+          >
+            Biblioteca Calibre: {calibreError}
+          </div>
+        </section>
       )}
 
       {calibreBooks.length > 0 && (

@@ -17,10 +17,20 @@ import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import { drag } from "d3-drag";
 import { select } from "d3-selection";
 import "d3-transition"; // side-effect: adiciona selection.transition(), usado no botão de reset de zoom
-import { GRAPH_SPACE_BACKGROUND } from "@/lib/colors";
+import { GRAPH_SPACE_BACKGROUND, GRAPH_TAG_NODE_COLOR } from "@/lib/colors";
+import { LayersIcon } from "@/components/SubtemaCard";
 
-export type GraphNode = { filename: string; title: string; tag: string | null };
-export type GraphEdge = { source: string; target: string };
+// `filename` dobra como "id" genérico do nó — pra um nó kind:"tag" (Modo Mapa
+// de TagFocusPage.tsx) é o caminho de tag normalizado, não um arquivo de
+// verdade; renomear o campo quebraria toda a fiação existente (posições,
+// bind de drag, grau, aresta source/target) só pra um rótulo mais correto —
+// não vale o custo. `kind` ausente (Graph View global, todo nó é sempre uma
+// nota) é tratado como `"note"`, comportamento idêntico ao de antes desta
+// adição — mudança puramente aditiva.
+export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "tag" };
+// `kind` ausente = `"wikilink"` (único tipo que existia antes desta adição) —
+// mesma lógica de compatibilidade aditiva do `GraphNode.kind` acima.
+export type GraphEdge = { source: string; target: string; kind?: "hierarchy" | "wikilink" };
 
 type Props = {
   nodes: GraphNode[];
@@ -32,9 +42,14 @@ type Props = {
   // nó recebe destaque visual (opacidade máxima + anel de contorno), diferente de
   // `centerFilename`, que só controla a geometria do layout radial.
   activeNoteFilename?: string;
-  onSelectNote: (filename: string) => void;
-  isFullscreen: boolean;
-  onToggleFullscreen: () => void;
+  // Generalizado de onSelectNote(filename) — o único call site existente (Graph
+  // View global, page.tsx) ignora `kind` (lá todo nó é sempre "note").
+  onSelectNode: (id: string, kind: "note" | "tag") => void;
+  // Opcionais — o Modo Mapa de TagFocusPage.tsx não tem um botão de tela
+  // cheia próprio (pedido não incluiu isso); Graph View global continua
+  // passando os dois sempre, comportamento idêntico a antes desta adição.
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 };
 
 // Tamanho usado só até a primeira medição de verdade via ResizeObserver (evita
@@ -204,7 +219,7 @@ export default function GraphView({
   scope,
   centerFilename,
   activeNoteFilename,
-  onSelectNote,
+  onSelectNode,
   isFullscreen,
   onToggleFullscreen,
 }: Props) {
@@ -431,6 +446,14 @@ export default function GraphView({
             const from = positions[edge.source];
             const to = positions[edge.target];
             if (!from || !to) return null;
+            // `kind` AUSENTE = comportamento de sempre do Graph View global
+            // (cinza sólida, EDGE_COLOR) — nunca muda, mesmo depois desta
+            // adição. Só quando `kind` vem EXPLICITAMENTE setado (Modo Mapa
+            // de TagFocusPage.tsx) é que a aresta pode ficar tracejada azul
+            // ("wikilink" — link [[nota]] cruzando ramos, só informativo,
+            // nunca clicável, sem onClick em nenhuma das duas variantes) ou
+            // continuar sólida cinza ("hierarchy" — tema→subtema→nota).
+            const isExplicitWikilink = edge.kind === "wikilink";
             return (
               <line
                 key={i}
@@ -438,8 +461,9 @@ export default function GraphView({
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                stroke={EDGE_COLOR}
+                stroke={isExplicitWikilink ? "var(--link-color)" : EDGE_COLOR}
                 strokeWidth={1}
+                strokeDasharray={isExplicitWikilink ? "4 3" : undefined}
                 strokeLinecap="round"
                 opacity={0.4}
                 style={{
@@ -467,13 +491,24 @@ export default function GraphView({
             const seed = hashString(node.filename);
             const pulseDuration = 2.6 + (seed % 22) / 10; // 2.6s a 4.8s
             const pulseDelay = -((seed % 37) / 10); // atraso negativo: cada nó já nasce numa fase diferente do ciclo
+            // Nó "tag" só existe no Modo Mapa (TagFocusPage.tsx) — visual
+            // deliberadamente diferente da "estrela" de nota (sem glow, já
+            // que "grau de conexão" não é uma métrica que faça sentido pra um
+            // agrupamento): círculo vazio com anel colorido (âmbar na raiz —
+            // mesmo tom de qualquer link de tema/tag no app — teal nos
+            // demais) + o mesmo ícone de camadas usado em SubtemaCard.tsx,
+            // reforçando "isto é um agrupamento" com a mesma linguagem visual
+            // já usada ali.
+            const isTagNode = node.kind === "tag";
+            const tagRingColor = isCenter ? "var(--tag-link-color)" : GRAPH_TAG_NODE_COLOR;
+            const iconSize = radius * 1.3;
             return (
               <g
                 key={node.filename}
                 className="graph-node"
                 data-filename={node.filename}
                 transform={`translate(${pos.x}, ${pos.y})`}
-                onClick={() => onSelectNote(node.filename)}
+                onClick={() => onSelectNode(node.filename, node.kind ?? "note")}
                 style={{
                   cursor: layoutMode === "force" ? "grab" : "pointer",
                   opacity,
@@ -481,22 +516,33 @@ export default function GraphView({
                     isDragging || layoutMode === "force" ? `opacity ${TRANSITION}` : `transform ${TRANSITION}, opacity ${TRANSITION}`,
                 }}
               >
-                <circle
-                  className="graph-node-glow"
-                  r={radius * 2.2}
-                  fill={GLOW_COLOR}
-                  filter="url(#graph-star-glow)"
-                  style={{
-                    animationDuration: `${pulseDuration}s`,
-                    animationDelay: `${pulseDelay}s`,
-                  }}
-                />
-                <circle
-                  r={radius}
-                  fill="url(#graph-star-core)"
-                  stroke={isActive ? HIGHLIGHT_RING_COLOR : "none"}
-                  strokeWidth={2}
-                />
+                {isTagNode ? (
+                  <>
+                    <circle r={radius} fill={GRAPH_SPACE_BACKGROUND} stroke={tagRingColor} strokeWidth={2} />
+                    <g transform={`translate(${-iconSize / 2}, ${-iconSize / 2})`} style={{ color: tagRingColor }}>
+                      <LayersIcon size={iconSize} />
+                    </g>
+                  </>
+                ) : (
+                  <>
+                    <circle
+                      className="graph-node-glow"
+                      r={radius * 2.2}
+                      fill={GLOW_COLOR}
+                      filter="url(#graph-star-glow)"
+                      style={{
+                        animationDuration: `${pulseDuration}s`,
+                        animationDelay: `${pulseDelay}s`,
+                      }}
+                    />
+                    <circle
+                      r={radius}
+                      fill="url(#graph-star-core)"
+                      stroke={isActive ? HIGHLIGHT_RING_COLOR : "none"}
+                      strokeWidth={2}
+                    />
+                  </>
+                )}
                 <text x={0} y={26} textAnchor="middle" fontSize="12" fill="var(--foreground)">
                   {node.title}
                 </text>
@@ -507,22 +553,24 @@ export default function GraphView({
       </svg>
 
       <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px" }}>
-        <button
-          onClick={onToggleFullscreen}
-          title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
-          style={{
-            padding: "0.3rem 0.4rem",
-            background: "var(--panel-bg)",
-            border: "1px solid var(--panel-border)",
-            borderRadius: "4px",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            color: "var(--foreground)",
-          }}
-        >
-          <FullscreenIcon active={isFullscreen} />
-        </button>
+        {onToggleFullscreen && (
+          <button
+            onClick={onToggleFullscreen}
+            title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+            style={{
+              padding: "0.3rem 0.4rem",
+              background: "var(--panel-bg)",
+              border: "1px solid var(--panel-border)",
+              borderRadius: "4px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              color: "var(--foreground)",
+            }}
+          >
+            <FullscreenIcon active={!!isFullscreen} />
+          </button>
+        )}
         <button
           onClick={resetView}
           title="Restaurar zoom"

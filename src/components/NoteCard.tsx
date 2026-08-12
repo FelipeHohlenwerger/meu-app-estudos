@@ -119,8 +119,9 @@ type Props = {
 // Botões flutuantes (favorito/opções) sobre a faixa de imagem — precisam de
 // contraste tanto sobre uma foto quanto sobre o fundo liso do placeholder de
 // tipo, daí o fundo semi-transparente (não existia quando ficavam sobre o
-// corpo liso do card, antes do redesenho).
-const overlayButtonStyle: React.CSSProperties = {
+// corpo liso do card, antes do redesenho). Exportado — SubtemaCard.tsx
+// reaproveita o mesmo tratamento visual pro botão de capa do subtema.
+export const overlayButtonStyle: React.CSSProperties = {
   padding: "0.3rem",
   border: "none",
   borderRadius: "50%",

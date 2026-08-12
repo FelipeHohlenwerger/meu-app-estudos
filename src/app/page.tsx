@@ -8,7 +8,7 @@ import TagFocusPage from "@/components/TagFocusPage";
 import CalibreLibraryPage from "@/components/CalibreLibraryPage";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { StarIcon, type LibraryNote } from "@/components/NoteCard";
-import { buildTagTree, filterTagTree, formatTagLabel, type TagTreeNode } from "@/lib/tagTree";
+import { buildTagTree, filterTagTree, formatTagLabel, normalizeTagKey, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
 import NoteRowMenu from "@/components/NoteRowMenu";
 import ConfirmModal from "@/components/ConfirmModal";
@@ -112,7 +112,7 @@ function FilterBookIcon() {
 type HomeView =
   | { kind: "library" }
   | { kind: "tagList"; tag: string | null }
-  | { kind: "tagFocus"; macroTag: string }
+  | { kind: "tagFocus"; tagPath: string }
   | { kind: "recentList" }
   | { kind: "favoritesList" }
   | { kind: "calibreLibrary" }
@@ -156,6 +156,10 @@ export default function Home() {
   const [homeView, setHomeView] = useState<HomeView>({ kind: "library" });
   const [libraryNotes, setLibraryNotes] = useState<LibraryNote[]>([]);
   const [allTags, setAllTags] = useState<string[]>([]);
+  // Capas manuais de subtema (SubtemaCard, ver TagFocusPage.tsx), por vault —
+  // mesmo padrão bulk-fetch de libraryNotes: busca tudo de uma vez, filtra em
+  // memória por tagPath ao renderizar cada card.
+  const [tagCovers, setTagCovers] = useState<Record<string, string>>({});
 
   // Tela dividida: dois painéis independentes (cada um com seu próprio estado
   // de nota, edição, comentários etc. — ver NotePanel.tsx), controlados por
@@ -194,6 +198,11 @@ export default function Home() {
   // "Calibre" da sidebar, card + página cheia da Homepage, e o autocomplete
   // "[[" unificado (ver linkTargets abaixo).
   const [calibreBooks, setCalibreBooks] = useState<CalibreBook[]>([]);
+  // Erro da última tentativa de buscar a biblioteca Calibre (null = última
+  // busca OK). Sem isso, uma falha (ex: 500 por lock do Calibre) e "nenhum
+  // livro configurado" eram indistinguíveis na UI — as duas produziam lista
+  // vazia em silêncio.
+  const [calibreError, setCalibreError] = useState<string | null>(null);
   // Filtro por tipo da aba "Tags" — escondido por padrão atrás do ícone de
   // livro ao lado da busca (usado com pouca frequência, mesmo espírito do
   // "⋯" do painel de imagem); não reseta ao trocar de aba, mesmo espírito de
@@ -523,13 +532,19 @@ export default function Home() {
     return buildTagTree(Array.from(counts.entries()));
   }, [sidebarCalibreFiltered]);
 
+  // Chave normalizada (ver normalizeTagKey) — buildTagTree também produz
+  // node.fullPath já normalizado (sidebarCalibreSubjectTree acima), então
+  // essa busca (renderCalibreTreeNode, mais abaixo) precisa comparar contra a
+  // mesma forma pra achar o livro certo independente da caixa/espaçamento
+  // usados no "assunto" do Calibre.
   const calibreBooksBySubject = useMemo(() => {
     const map = new Map<string, CalibreBook[]>();
     for (const book of sidebarCalibreFiltered) {
       for (const subject of book.subjects) {
-        const list = map.get(subject) ?? [];
+        const key = normalizeTagKey(subject);
+        const list = map.get(key) ?? [];
         list.push(book);
-        map.set(subject, list);
+        map.set(key, list);
       }
     }
     return map;
@@ -727,9 +742,20 @@ export default function Home() {
   // VaultSwitcher.tsx), sem erro nenhum.
   function fetchCalibreBooks() {
     fetch("/api/calibre/books")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.books) setCalibreBooks(data.books);
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.books) {
+          setCalibreError(data?.error ?? `Falha ao carregar a biblioteca Calibre (HTTP ${res.status})`);
+          return;
+        }
+        setCalibreError(null);
+        setCalibreBooks(data.books);
+      })
+      .catch((err) => {
+        // Falha de rede/parse (não chegou a ter resposta HTTP) — distinto do
+        // caso acima (servidor respondeu, mas com erro), mensagem também
+        // distinta pra facilitar diagnóstico.
+        setCalibreError(`Não foi possível conectar ao servidor: ${err instanceof Error ? err.message : String(err)}`);
       });
   }
   useEffect(() => {
@@ -773,6 +799,19 @@ export default function Home() {
       });
   }
 
+  // Capas manuais de subtema — buscadas separado de fetchLibraryData porque
+  // mudam num ritmo próprio (só quando alguém define/troca/remove a capa de
+  // um subtema pelo SubtemaCard, não a cada save de nota).
+  function fetchTagCovers() {
+    const requestedVaultId = activeVaultId;
+    vaultFetch("/api/tag/cover")
+      .then((res) => res.json())
+      .then((data) => {
+        if (activeVaultIdRef.current !== requestedVaultId) return;
+        if (data.covers) setTagCovers(data.covers);
+      });
+  }
+
   function handleLibraryChanged() {
     fetchNoteTargets();
     fetchLibraryData();
@@ -785,6 +824,7 @@ export default function Home() {
     if (!activeVaultId) return;
     fetchNoteTargets();
     fetchLibraryData();
+    fetchTagCovers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeVaultId]);
 
@@ -1082,8 +1122,13 @@ export default function Home() {
   // duplicada em cada nível da hierarquia até a raiz).
   function renderTagTreeNode(node: TagTreeNode, depth: number) {
     const isExpanded = sidebarSearch.trim() !== "" || expandedTags.has(node.fullPath);
+    // node.fullPath já vem normalizado de buildTagTree (minúsculo/trim) — a
+    // comparação aqui também precisa normalizar cada tag da nota, senão uma
+    // nota tageada "História.Antiga" nunca bateria com o nó "história.antiga"
+    // (mesmo bug de fundo corrigido em buildTagTree, só que na hora de achar
+    // as notas-folha em vez de agrupar os nós).
     const matchingNotes = isExpanded
-      ? libraryNotes.filter((n) => n.tags.includes(node.fullPath) && matchesTypeFilter(n, sidebarTypeFilter))
+      ? libraryNotes.filter((n) => n.tags.some((t) => normalizeTagKey(t) === node.fullPath) && matchesTypeFilter(n, sidebarTypeFilter))
       : [];
     return (
       <div key={node.fullPath} style={{ marginBottom: "0.25rem" }}>
@@ -1520,7 +1565,7 @@ export default function Home() {
           scope={graphScope}
           centerFilename={graphScope === "local" ? focusedFilename ?? undefined : undefined}
           activeNoteFilename={focusedFilename ?? undefined}
-          onSelectNote={(filename) => openNoteInPanel(filename)}
+          onSelectNode={(filename) => openNoteInPanel(filename)}
           isFullscreen={graphFullscreen}
           onToggleFullscreen={() => setGraphFullscreen((v) => !v)}
         />
@@ -1745,12 +1790,13 @@ export default function Home() {
           onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onViewTag={(tag) => setHomeView({ kind: "tagList", tag })}
-          onViewTagFocus={(macroTag) => setHomeView({ kind: "tagFocus", macroTag })}
+          onViewTagFocus={(tag) => setHomeView({ kind: "tagFocus", tagPath: tag })}
           onViewRecent={() => setHomeView({ kind: "recentList" })}
           onViewFavorites={() => setHomeView({ kind: "favoritesList" })}
           onToggleFavorite={toggleFavorite}
           onCoverChanged={handleLibraryChanged}
           calibreBooks={calibreBooks}
+          calibreError={calibreError}
           onOpenCalibreBook={openCalibreBook}
           onViewCalibreLibrary={() => setHomeView({ kind: "calibreLibrary" })}
           onOpenNewNoteMenu={openNewNoteMenu}
@@ -1765,7 +1811,9 @@ export default function Home() {
       {homeView.kind === "tagList" && (
         <TagNoteList
           tag={homeView.tag}
-          notes={libraryNotes.filter((n) => (homeView.tag ? n.tags.includes(homeView.tag) : n.tags.length === 0))}
+          notes={libraryNotes.filter((n) =>
+            homeView.tag ? n.tags.some((t) => normalizeTagKey(t) === normalizeTagKey(homeView.tag!)) : n.tags.length === 0
+          )}
           onOpenNote={openNoteInPanel}
           onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
@@ -1776,15 +1824,21 @@ export default function Home() {
 
       {homeView.kind === "tagFocus" && (
         <TagFocusPage
-          macroTag={homeView.macroTag}
-          notes={libraryNotes.filter(
-            (n) => n.tags.includes(homeView.macroTag) || n.tags.some((t) => t.startsWith(`${homeView.macroTag}.`))
+          tagPath={homeView.tagPath}
+          notes={libraryNotes.filter((n) =>
+            n.tags.some((t) => {
+              const normTag = normalizeTagKey(t);
+              const normPath = normalizeTagKey(homeView.tagPath);
+              return normTag === normPath || normTag.startsWith(`${normPath}.`);
+            })
           )}
-          onBack={() => setHomeView({ kind: "library" })}
+          onNavigate={(tagPath) => (tagPath === null ? setHomeView({ kind: "library" }) : setHomeView({ kind: "tagFocus", tagPath }))}
           onOpenNote={openNoteInPanel}
           onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onToggleFavorite={toggleFavorite}
+          tagCovers={tagCovers}
+          onTagCoverChanged={fetchTagCovers}
         />
       )}
 
@@ -1817,7 +1871,7 @@ export default function Home() {
       )}
 
       {homeView.kind === "calibreLibrary" && (
-        <CalibreLibraryPage books={calibreBooks} onBack={() => setHomeView({ kind: "library" })} onOpenBook={openCalibreBook} />
+        <CalibreLibraryPage books={calibreBooks} error={calibreError} onBack={() => setHomeView({ kind: "library" })} onOpenBook={openCalibreBook} />
       )}
 
       {/* Conteúdo principal: notas + painel(éis) de nota */}
@@ -1975,6 +2029,23 @@ export default function Home() {
           )}
         </div>
 
+        {sidebarTab === "calibre" && calibreError && (
+          <div
+            style={{
+              marginBottom: "0.75rem",
+              padding: "0.5rem 0.6rem",
+              borderRadius: "6px",
+              border: "1px solid var(--danger, #c0392b)",
+              background: "var(--panel-hover)",
+              color: "var(--danger, #c0392b)",
+              fontSize: "0.75rem",
+              lineHeight: 1.4,
+            }}
+          >
+            {calibreError}
+          </div>
+        )}
+
         {sidebarTab === "calibre" && (
           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
             {([
@@ -2114,9 +2185,11 @@ export default function Home() {
 
         {sidebarTab === "calibre" &&
           (calibreBooks.length === 0 ? (
-            <p style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
-              Nenhum livro encontrado. Configure a biblioteca Calibre nas configurações do vault.
-            </p>
+            !calibreError && (
+              <p style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                Nenhum livro encontrado. Configure a biblioteca Calibre nas configurações do vault.
+              </p>
+            )
           ) : calibreSidebarMode === "assunto" ? (
             sidebarCalibreSubjectTree.map((node) => renderCalibreTreeNode(node, 0))
           ) : calibreSidebarMode === "serie" ? (

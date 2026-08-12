@@ -37,14 +37,29 @@ function CalibreFilterField({
 }) {
   const [draft, setDraft] = useState("");
   const [open, setOpen] = useState(false);
+  // Índice destacado na lista de sugestões — navegável por seta pra cima/
+  // baixo, com Enter confirmando a selecionada (mesmo comportamento já
+  // implementado pro autocomplete de tags em notas, ver TagField.tsx).
+  const [highlighted, setHighlighted] = useState(0);
+  // Índice da ÚLTIMA pílula "selecionada" via Backspace (sempre a última da
+  // lista, mesmo padrão do campo "Para" do Gmail) — primeiro Backspace com o
+  // campo vazio só destaca a pílula (chance de desistir apertando qualquer
+  // outra tecla), um SEGUNDO Backspace em seguida é que remove de verdade.
+  const [selectedPillIndex, setSelectedPillIndex] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleMouseDown(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSelectedPillIndex(null);
+      }
     }
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        setSelectedPillIndex(null);
+      }
     }
     window.addEventListener("mousedown", handleMouseDown);
     window.addEventListener("keydown", handleKeyDown);
@@ -65,6 +80,39 @@ function CalibreFilterField({
     setOpen(false);
   }
 
+  function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown") {
+      if (suggestions.length === 0) return;
+      e.preventDefault();
+      setOpen(true);
+      setHighlighted((h) => (h + 1) % suggestions.length);
+    } else if (e.key === "ArrowUp") {
+      if (suggestions.length === 0) return;
+      e.preventDefault();
+      setOpen(true);
+      setHighlighted((h) => (h - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === "Enter") {
+      if (suggestions.length === 0) return;
+      e.preventDefault();
+      commit(suggestions[highlighted] ?? suggestions[0]);
+    } else if (e.key === "Backspace" && draft === "") {
+      if (selected.length === 0) return;
+      e.preventDefault();
+      const lastIndex = selected.length - 1;
+      if (selectedPillIndex === lastIndex) {
+        // 2º Backspace seguido, sem nada de permeio — remove de vez.
+        onChange(selected.filter((_, i) => i !== lastIndex));
+        setSelectedPillIndex(null);
+      } else {
+        // 1º Backspace — só destaca, ainda não remove.
+        setSelectedPillIndex(lastIndex);
+      }
+    } else if (selectedPillIndex !== null) {
+      // Qualquer outra tecla desfaz o destaque (só Backspace repetido remove).
+      setSelectedPillIndex(null);
+    }
+  }
+
   return (
     <div ref={containerRef} style={{ position: "relative", minWidth: "220px", flex: 1 }}>
       <div
@@ -79,7 +127,7 @@ function CalibreFilterField({
           background: "var(--panel-bg)",
         }}
       >
-        {selected.map((value) => (
+        {selected.map((value, i) => (
           <span
             key={value}
             style={{
@@ -88,14 +136,28 @@ function CalibreFilterField({
               gap: "0.3rem",
               padding: "0.15rem 0.5rem",
               borderRadius: "999px",
-              background: "var(--panel-hover)",
+              // Destaque do 1º Backspace (ver handleInputKeyDown) — mesmo
+              // tom de --accent já usado pra "isto está em edição" em
+              // TagChips.tsx, avisando que outro Backspace remove de vez.
+              background: selectedPillIndex === i ? "var(--accent)" : "var(--panel-hover)",
+              color: selectedPillIndex === i ? "var(--background)" : "inherit",
               fontSize: "0.8rem",
             }}
           >
             {formatOption ? formatOption(value) : value}
             <button
-              onClick={() => onChange(selected.filter((s) => s !== value))}
-              style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted)", padding: 0, lineHeight: 1 }}
+              onClick={() => {
+                onChange(selected.filter((s) => s !== value));
+                setSelectedPillIndex(null);
+              }}
+              style={{
+                border: "none",
+                background: "transparent",
+                cursor: "pointer",
+                color: selectedPillIndex === i ? "var(--background)" : "var(--text-muted)",
+                padding: 0,
+                lineHeight: 1,
+              }}
             >
               ×
             </button>
@@ -106,8 +168,10 @@ function CalibreFilterField({
           onChange={(e) => {
             setDraft(e.target.value);
             setOpen(true);
+            setHighlighted(0);
           }}
           onFocus={() => setOpen(true)}
+          onKeyDown={handleInputKeyDown}
           placeholder={selected.length === 0 ? placeholder : ""}
           style={{
             flex: 1,
@@ -139,24 +203,23 @@ function CalibreFilterField({
             overflowY: "auto",
           }}
         >
-          {suggestions.map((s) => (
+          {suggestions.map((s, i) => (
             <button
               key={s}
               onClick={() => commit(s)}
+              onMouseEnter={() => setHighlighted(i)}
               style={{
                 display: "block",
                 width: "100%",
                 textAlign: "left",
                 padding: "0.35rem 0.5rem",
-                background: "transparent",
+                background: highlighted === i ? "var(--panel-hover)" : "transparent",
                 border: "none",
                 borderRadius: "4px",
                 cursor: "pointer",
                 fontSize: "0.85rem",
                 color: "var(--foreground)",
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel-hover)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
               {formatOption ? formatOption(s) : s}
             </button>
@@ -169,6 +232,7 @@ function CalibreFilterField({
 
 type Props = {
   books: CalibreBook[];
+  error: string | null;
   onBack: () => void;
   onOpenBook: (book: CalibreBook) => void;
 };
@@ -177,7 +241,7 @@ type Props = {
 // combináveis (Assunto/Série/Autor, E lógico entre eles), diferente do modo
 // EXCLUSIVO da aba "Calibre" da sidebar (ver page.tsx). Sem filtro de
 // Editora (já disponível direto no Calibre, não precisa ser duplicado aqui).
-export default function CalibreLibraryPage({ books, onBack, onOpenBook }: Props) {
+export default function CalibreLibraryPage({ books, error, onBack, onOpenBook }: Props) {
   const [subjectFilters, setSubjectFilters] = useState<string[]>([]);
   const [seriesFilters, setSeriesFilters] = useState<string[]>([]);
   const [authorFilters, setAuthorFilters] = useState<string[]>([]);
@@ -223,6 +287,23 @@ export default function CalibreLibraryPage({ books, onBack, onOpenBook }: Props)
         {filtered.length} {filtered.length === 1 ? "livro" : "livros"}
       </p>
 
+      {error && (
+        <div
+          style={{
+            marginTop: "1rem",
+            padding: "0.75rem 1rem",
+            borderRadius: "6px",
+            border: "1px solid var(--danger, #c0392b)",
+            background: "var(--panel-hover)",
+            color: "var(--danger, #c0392b)",
+            fontSize: "0.85rem",
+            lineHeight: 1.4,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "1.5rem" }}>
         <CalibreFilterField placeholder="Assunto..." options={allSubjects} selected={subjectFilters} onChange={setSubjectFilters} formatOption={formatTagLabel} />
         <CalibreFilterField placeholder="Série..." options={allSeries} selected={seriesFilters} onChange={setSeriesFilters} />
@@ -235,7 +316,7 @@ export default function CalibreLibraryPage({ books, onBack, onOpenBook }: Props)
         ))}
       </div>
 
-      {filtered.length === 0 && <p style={{ color: "var(--text-muted)", marginTop: "2rem" }}>Nenhum livro encontrado.</p>}
+      {filtered.length === 0 && !error && <p style={{ color: "var(--text-muted)", marginTop: "2rem" }}>Nenhum livro encontrado.</p>}
     </div>
   );
 }

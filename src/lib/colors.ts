@@ -51,6 +51,14 @@ export const calloutColorsPalette: Record<string, string> = Object.fromEntries(
 // Fundo "espaço" do Graph View (painel lateral e overlay de tela cheia).
 export const GRAPH_SPACE_BACKGROUND = "#17181a";
 
+// Cor do anel de nó "tag" (agrupamento hierárquico) no Modo Mapa da página de
+// foco (TagFocusPage.tsx + GraphView.tsx) — diferencia visualmente de nó
+// "nota" (que mantém o visual padrão já existente do Graph View global,
+// NODE_COLOR/GLOW_COLOR em GraphView.tsx). A raiz da hierarquia (tema atual)
+// usa var(--tag-link-color) direto no componente (mesmo âmbar de qualquer
+// link de tema/tag no app); subtemas não-raiz usam este teal.
+export const GRAPH_TAG_NODE_COLOR = "#5fb3a6";
+
 // Cor por nível de heading (# até ######) no corpo da nota — índice 0 = H1.
 // Só cor; tamanho de fonte continua definido separadamente em livePreview.ts.
 export const HEADING_COLORS: string[] = [

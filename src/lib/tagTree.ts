@@ -34,14 +34,34 @@ function toSortedNodes(map: Map<string, MutableNode>): TagTreeNode[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Chave de COMPARAÇÃO/agrupamento de uma tag (ou de um segmento dela) — nunca
+// de exibição nem de escrita. Duas tags digitadas com capitalização ou
+// espaçamento diferente (ex: "História.Antiga" vs "história.antiga") sempre
+// precisam ser tratadas como a MESMA tag em qualquer contagem/agrupamento/
+// navegação, mesmo que o dado já salvo (tabela `tags`, nunca reescrita aqui)
+// mantenha a grafia original de cada nota. trim() cobre espaço solto nas
+// pontas; toLowerCase() cobre diferença de caixa (Unicode-aware, cobre
+// acentuação corretamente). Bug real encontrado: sem isso, "história" e
+// "História.Antiga" viravam raízes DIFERENTES da árvore/das seções da
+// Homepage, cada uma com sua própria contagem parcial.
+export function normalizeTagKey(tag: string): string {
+  return tag.trim().toLowerCase();
+}
+
 // `tagCounts`: mesmo formato de getTagCounts()/GET /api/tags — [tag, contagem
 // de notas com essa tag exata]. Sem profundidade máxima: aceita quantos "."
-// existirem no texto da tag.
+// existirem no texto da tag. Nós são agrupados por segmento NORMALIZADO (ver
+// normalizeTagKey) — duas entradas de `tagCounts` que só diferem por caixa/
+// espaçamento caem no MESMO nó, com as contagens somadas (não sobrescritas).
+// `name`/`fullPath` do nó sempre usam a forma normalizada (minúscula) —
+// formatTagLabel (exibição) já capitaliza a partir dela de forma consistente,
+// então não há motivo pra tentar preservar a grafia original de uma
+// digitação específica aqui.
 export function buildTagTree(tagCounts: [string, number][]): TagTreeNode[] {
   const root = new Map<string, MutableNode>();
 
   for (const [tag, count] of tagCounts) {
-    const segments = tag.split(".").map((s) => s.trim()).filter(Boolean);
+    const segments = tag.split(".").map((s) => normalizeTagKey(s)).filter(Boolean);
     if (segments.length === 0) continue;
 
     let level = root;
@@ -56,11 +76,93 @@ export function buildTagTree(tagCounts: [string, number][]): TagTreeNode[] {
       }
       level = node.children;
     }
-    // `node` é o último segmento (a tag inteira) — recebe a contagem exata.
-    if (node) node.ownCount = count;
+    // `node` é o último segmento (a tag inteira) — soma a contagem exata (não
+    // sobrescreve: mais de uma variante de caixa da mesma tag pode chegar
+    // aqui separadamente, ver comentário da função acima).
+    if (node) node.ownCount += count;
   }
 
   return toSortedNodes(root);
+}
+
+// Mesma forma de TagTreeNode, mas carregando as NOTAS de verdade em cada nó
+// (não só uma contagem) — usado pela página de foco (TagFocusPage.tsx), que
+// precisa renderizar cards de nota em qualquer um dos 3 modos de visualização
+// (Navegação/Visão Geral/Mapa), todos lendo desta MESMA árvore em vez de cada
+// modo reimplementar seu próprio agrupamento (era exatamente esse tipo de
+// duplicação que causava um lugar mostrar um subtema corretamente e outro
+// não — ver normalizeTagKey acima).
+export type TagNoteTreeNode<T> = {
+  path: string; // caminho completo normalizado até aqui
+  segment: string; // só o último segmento (normalizado)
+  ownNotes: T[]; // notas tageadas EXATAMENTE em `path`
+  children: TagNoteTreeNode<T>[]; // profundidade ilimitada, ordenado por segmento
+};
+
+// Constrói a subárvore com raiz em `rootPath` (já deve vir normalizado — ver
+// normalizeTagKey) a partir de uma lista de notas já filtrada pro subtree
+// (mesmo contrato de `notes` em TagFocusPage.tsx: cada nota aqui tem pelo
+// menos uma tag igual a `rootPath` ou descendente dela — notas sem nenhuma
+// tag relevante são simplesmente ignoradas). Cria nós intermediários mesmo
+// sem nota própria quando necessário pra manter a estrutura (ex: uma nota só
+// tageada "história.antiga.livros" ainda cria o nó "história.antiga" no
+// caminho, com `ownNotes` vazio).
+export function buildTagNoteTree<T extends { tags: string[] }>(rootPath: string, notes: T[]): TagNoteTreeNode<T> {
+  type MutableNoteNode = { segment: string; path: string; ownNotes: T[]; children: Map<string, MutableNoteNode> };
+
+  const root: MutableNoteNode = { segment: rootPath.split(".").pop() ?? rootPath, path: rootPath, ownNotes: [], children: new Map() };
+  const prefix = `${rootPath}.`;
+
+  for (const note of notes) {
+    for (const rawTag of note.tags) {
+      const tag = normalizeTagKey(rawTag);
+      if (tag === rootPath) {
+        root.ownNotes.push(note);
+        continue;
+      }
+      if (!tag.startsWith(prefix)) continue;
+
+      const restSegments = tag.slice(prefix.length).split(".");
+      let currentPath = rootPath;
+      let parent = root;
+      for (const segment of restSegments) {
+        currentPath = `${currentPath}.${segment}`;
+        let child = parent.children.get(segment);
+        if (!child) {
+          child = { segment, path: currentPath, ownNotes: [], children: new Map() };
+          parent.children.set(segment, child);
+        }
+        parent = child;
+      }
+      parent.ownNotes.push(note);
+    }
+  }
+
+  function finalize(node: MutableNoteNode): TagNoteTreeNode<T> {
+    const children = Array.from(node.children.values())
+      .map(finalize)
+      .sort((a, b) => a.segment.localeCompare(b.segment));
+    return { path: node.path, segment: node.segment, ownNotes: node.ownNotes, children };
+  }
+
+  return finalize(root);
+}
+
+// Todas as notas da subárvore a partir de `node` (própria + de todo
+// descendente), sem duplicar uma nota que apareça em mais de um nível (ex:
+// tageada tanto no nível pai quanto num filho — caso real confirmado: uma
+// nota pode ter "história.antiga" E "história.antiga.livros" ao mesmo tempo).
+// Usado pelo contador "N notas" dos cards de subtema (soma a subárvore
+// inteira, não só o nível direto) — `getKey` decide identidade (normalmente
+// `note => note.filename`).
+export function collectAllNotes<T>(node: TagNoteTreeNode<T>, getKey: (note: T) => string): T[] {
+  const seen = new Map<string, T>();
+  function visit(n: TagNoteTreeNode<T>) {
+    for (const note of n.ownNotes) seen.set(getKey(note), note);
+    for (const child of n.children) visit(child);
+  }
+  visit(node);
+  return Array.from(seen.values());
 }
 
 // Formata uma tag pra EXIBIÇÃO — nunca usado pro dado salvo/filtro/navegação,

@@ -354,6 +354,19 @@ function getDb(vaultId: string): DatabaseSync {
       anchor_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_book_comments_note ON book_comments(note_id);
+
+    -- Capa manual de um SUBTEMA (caminho de tag dot-hierárquico, ex:
+    -- "história.pré-história.livros" — ver TagFocusPage.tsx), mostrada no
+    -- SubtemaCard da página de foco. Independente de notes/tags: um
+    -- subtema não é uma linha em nenhuma tabela hoje (é só um prefixo de tag
+    -- calculado em memória no front), então não há onde pendurar uma FK — a
+    -- própria string do caminho é a chave. Sobrevive à nota que originou o
+    -- subtema ser apagada/renomeada (capa órfã fica sem uso, sem problema,
+    -- mesmo espírito de comentário órfão em calibre-annotations.sqlite).
+    CREATE TABLE IF NOT EXISTS tag_covers (
+      tag_path TEXT PRIMARY KEY,
+      cover_path TEXT NOT NULL
+    );
   `);
 
   migrate(conn);
@@ -693,6 +706,33 @@ export function setNoteFavorite(vaultId: string, filename: string, isFavorite: b
 export function setNoteCover(vaultId: string, filename: string, coverPath: string | null): void {
   const conn = getDb(vaultId);
   conn.prepare("UPDATE notes SET cover_manual_path = ? WHERE filename = ? COLLATE NOCASE").run(coverPath, filename);
+}
+
+// Todas as capas de subtema já definidas nesta vault, de uma vez — mesmo
+// padrão "bulk fetch, filtra em memória" já usado pro resto do app (ver
+// getLibraryData). Chave = caminho de tag exato (case-sensitive, mesmo
+// tratamento que note.tags.includes(tagPath) já usa em TagFocusPage.tsx —
+// tags nesta vault nunca são normalizadas por caixa).
+export function getTagCovers(vaultId: string): Record<string, string> {
+  const conn = getDb(vaultId);
+  const rows = conn.prepare("SELECT tag_path, cover_path FROM tag_covers").all() as { tag_path: string; cover_path: string }[];
+  const covers: Record<string, string> = {};
+  for (const row of rows) covers[row.tag_path] = row.cover_path;
+  return covers;
+}
+
+// Define/troca/remove a capa manual de um subtema — único caminho de escrita
+// de `tag_covers` (PUT /api/tag/cover). `coverPath: null` remove a linha por
+// completo (subtema volta a mostrar o ícone de camadas padrão).
+export function setTagCover(vaultId: string, tagPath: string, coverPath: string | null): void {
+  const conn = getDb(vaultId);
+  if (coverPath === null) {
+    conn.prepare("DELETE FROM tag_covers WHERE tag_path = ?").run(tagPath);
+    return;
+  }
+  conn
+    .prepare("INSERT INTO tag_covers (tag_path, cover_path) VALUES (?, ?) ON CONFLICT(tag_path) DO UPDATE SET cover_path = excluded.cover_path")
+    .run(tagPath, coverPath);
 }
 
 export function getTagsByNote(vaultId: string): Record<string, string[]> {

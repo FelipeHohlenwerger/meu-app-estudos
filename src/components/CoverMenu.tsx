@@ -46,6 +46,13 @@ export default function CoverMenu({ x, y, onChange, onRemove, onClose }: Props) 
   return (
     <div
       ref={ref}
+      // Para junto qualquer clique aqui dentro — este menu é sempre
+      // renderizado DENTRO de um elemento que também tem seu próprio
+      // onClick (o card inteiro abre a nota, ou no caso de SubtemaCard,
+      // navega pro subtema); sem isso, clicar em "Remover capa"/"Trocar
+      // capa" também "vazava" esse clique pro card por baixo (mesmo
+      // problema que NoteRowMenu.tsx já tratava, só que faltava aqui).
+      onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
         left: x,

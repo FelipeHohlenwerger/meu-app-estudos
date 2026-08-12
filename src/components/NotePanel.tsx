@@ -1684,7 +1684,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
                 {!isCalibreBook && noteTags.length > 0 && (
                   <div style={{ marginTop: "0.4rem" }}>
-                    <TagChips tags={noteTags} onChange={handleTagsChange} />
+                    <TagChips tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />
                   </div>
                 )}
 
