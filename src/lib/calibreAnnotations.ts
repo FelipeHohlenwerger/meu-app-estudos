@@ -26,6 +26,20 @@ function getDb(): DatabaseSync {
       anchor_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_calibre_book_comments_book ON calibre_book_comments(calibre_book_id);
+
+    -- Vínculo nota↔livro (metadado puro, não insere texto na nota — ver
+    -- botão "Vincular" no visualizador, NotePanel.tsx). GLOBAL pelo mesmo
+    -- motivo dos comentários acima: uma nota de QUALQUER vault pode vincular
+    -- a este livro, então não faz sentido escopar por vault.
+    CREATE TABLE IF NOT EXISTS calibre_book_note_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      calibre_book_id INTEGER NOT NULL,
+      vault_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      UNIQUE(calibre_book_id, vault_id, filename)
+    );
+    CREATE INDEX IF NOT EXISTS idx_calibre_note_links_book ON calibre_book_note_links(calibre_book_id);
+    CREATE INDEX IF NOT EXISTS idx_calibre_note_links_note ON calibre_book_note_links(vault_id, filename);
   `);
   db = conn;
   return conn;
@@ -69,4 +83,55 @@ export function createCalibreBookComment(
 
 export function deleteCalibreBookComment(id: number): void {
   getDb().prepare("DELETE FROM calibre_book_comments WHERE id = ?").run(id);
+}
+
+// Notas (de qualquer vault) vinculadas a este livro — a UI resolve o título
+// de cada uma chamando getAllNoteTargets(vaultId) por vault distinto (ver
+// GET /api/calibre/note-links), já que o título vive no índice do vault, não
+// aqui.
+export function getLinkedNotes(calibreBookId: number): { vaultId: string; filename: string }[] {
+  const rows = getDb()
+    .prepare("SELECT vault_id, filename FROM calibre_book_note_links WHERE calibre_book_id = ? ORDER BY id ASC")
+    .all(calibreBookId) as { vault_id: string; filename: string }[];
+  return rows.map((r) => ({ vaultId: r.vault_id, filename: r.filename }));
+}
+
+// Livros vinculados a esta nota — usado pela seção "Livros vinculados" do
+// lado da nota (NotePanel.tsx).
+export function getLinkedBooks(vaultId: string, filename: string): number[] {
+  const rows = getDb()
+    .prepare("SELECT calibre_book_id FROM calibre_book_note_links WHERE vault_id = ? AND filename = ? ORDER BY id ASC")
+    .all(vaultId, filename) as { calibre_book_id: number }[];
+  return rows.map((r) => r.calibre_book_id);
+}
+
+// Mesma coisa que getLinkedBooks, mas pra várias notas de uma vez, agrupado
+// por filename — usado pelo Graph View (getLocalGraph/getGlobalGraph,
+// vaultIndex.ts) pra enriquecer o grafo com os vínculos da Parte "Vincular"
+// sem uma query por nota visitada.
+export function getLinkedBooksForNotes(vaultId: string, filenames: string[]): Map<string, number[]> {
+  const map = new Map<string, number[]>();
+  if (filenames.length === 0) return map;
+  const placeholders = filenames.map(() => "?").join(",");
+  const rows = getDb()
+    .prepare(`SELECT filename, calibre_book_id FROM calibre_book_note_links WHERE vault_id = ? AND filename IN (${placeholders})`)
+    .all(vaultId, ...filenames) as { filename: string; calibre_book_id: number }[];
+  for (const row of rows) {
+    const list = map.get(row.filename) ?? [];
+    list.push(row.calibre_book_id);
+    map.set(row.filename, list);
+  }
+  return map;
+}
+
+export function linkNoteToBook(calibreBookId: number, vaultId: string, filename: string): void {
+  getDb()
+    .prepare("INSERT OR IGNORE INTO calibre_book_note_links (calibre_book_id, vault_id, filename) VALUES (?, ?, ?)")
+    .run(calibreBookId, vaultId, filename);
+}
+
+export function unlinkNoteFromBook(calibreBookId: number, vaultId: string, filename: string): void {
+  getDb()
+    .prepare("DELETE FROM calibre_book_note_links WHERE calibre_book_id = ? AND vault_id = ? AND filename = ?")
+    .run(calibreBookId, vaultId, filename);
 }

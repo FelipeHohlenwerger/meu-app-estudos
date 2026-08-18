@@ -48,6 +48,19 @@ type Props = {
   // Id do comentário pra rolar até e destacar automaticamente quando o painel
   // abre a partir do marcador clicado no texto (ver CommentMarkerWidget).
   scrollToId?: number | null;
+  // Muda (incrementa) quando o botão flutuante do visualizador (NotePanel.tsx)
+  // é clicado — abre o composer de comentário geral direto, sem precisar de
+  // um segundo clique em "+ Novo comentário". O valor em si não importa, só
+  // a MUDANÇA (por isso o guard no efeito com um ref pro valor anterior, não
+  // "!== 0").
+  autoComposeTrigger?: number;
+  // Muda (incrementa) quando o usuário clica/aperta uma tecla dentro do
+  // conteúdo do EPUB (ver EpubViewer.onContentInteraction) — um clique ali
+  // nunca chega no document externo sozinho (isolamento de iframe), então é
+  // assim que o menu de tipo de comentário (síntese/importante/...) fecha ao
+  // "clicar fora" quando o "fora" é em cima do próprio livro. Mesma lógica de
+  // mudança-de-valor do autoComposeTrigger acima, não o valor em si.
+  closePickerTrigger?: number;
 };
 
 function EditIcon() {
@@ -99,6 +112,8 @@ export default function BookCommentsPanel({
   onDeleteAnchored,
   onEditAnchored,
   scrollToId,
+  autoComposeTrigger,
+  closePickerTrigger,
 }: Props) {
   const { vaultFetch } = useVault();
   const [comments, setComments] = useState<BookComment[]>([]);
@@ -106,6 +121,45 @@ export default function BookCommentsPanel({
   const [pendingTipo, setPendingTipo] = useState<string | null>(null);
   const [highlightedId, setHighlightedId] = useState<number | null>(null);
   const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const newCommentButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Aciona o MESMO fluxo do "+ Novo comentário" (clique real no botão, não
+  // reimplementado aqui) quando o botão flutuante do visualizador dispara
+  // `autoComposeTrigger` — só reage à mudança de valor (guarda o anterior
+  // via ref), nunca no primeiro render, e só quando o painel já está aberto
+  // (o botão só existe no DOM dentro de `{open && (...)}`, ver abaixo).
+  //
+  // O clique é adiado até a transição CSS de abrir o painel terminar (width
+  // no desktop, bottom no mobile — as duas com 0.22s, ver o <aside> abaixo).
+  // Sem o atraso, o clique síncrono acontece com o painel ainda animando
+  // (largura/posição intermediária), e getBoundingClientRect() do botão
+  // (usado pra ancorar o CalloutSlashMenu, ver "+ Novo comentário" abaixo)
+  // captura essa posição transitória — o menu de tipo abre fora da
+  // viewport, clicável só na aparência (bug real, achado testando esse
+  // fluxo: o menu parecia "não fechar" porque o clique num tipo nunca
+  // acertava o botão de verdade).
+  const prevTriggerRef = useRef(autoComposeTrigger);
+  useEffect(() => {
+    if (open && autoComposeTrigger !== undefined && autoComposeTrigger !== prevTriggerRef.current) {
+      const timeout = setTimeout(() => newCommentButtonRef.current?.click(), 260);
+      prevTriggerRef.current = autoComposeTrigger;
+      return () => clearTimeout(timeout);
+    }
+    prevTriggerRef.current = autoComposeTrigger;
+  }, [open, autoComposeTrigger]);
+
+  // Fecha o menu de tipo (síntese/importante/...) quando o "clicar fora"
+  // aconteceu em cima do conteúdo do EPUB — ver comentário no tipo
+  // `closePickerTrigger` acima. Só o pickerAnchor (a lista de tipos); NÃO
+  // fecha o CommentModal (pendingTipo) se já estiver escrevendo o texto, pra
+  // não perder um comentário em andamento por um clique sem querer.
+  const prevCloseTriggerRef = useRef(closePickerTrigger);
+  useEffect(() => {
+    if (closePickerTrigger !== undefined && closePickerTrigger !== prevCloseTriggerRef.current) {
+      setPickerAnchor(null);
+    }
+    prevCloseTriggerRef.current = closePickerTrigger;
+  }, [closePickerTrigger]);
 
   useEffect(() => {
     const request =
@@ -227,6 +281,7 @@ export default function BookCommentsPanel({
           </div>
 
           <button
+            ref={newCommentButtonRef}
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               setPickerAnchor({ x: rect.left, y: rect.bottom + 6 });
@@ -338,6 +393,7 @@ export default function BookCommentsPanel({
             setPickerAnchor(null);
             setPendingTipo(tipo);
           }}
+          onClose={() => setPickerAnchor(null)}
         />
       )}
 

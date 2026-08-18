@@ -59,6 +59,13 @@ export const GRAPH_SPACE_BACKGROUND = "#17181a";
 // link de tema/tag no app); subtemas não-raiz usam este teal.
 export const GRAPH_TAG_NODE_COLOR = "#5fb3a6";
 
+// Nó "livro do Calibre" no Graph View (GraphView.tsx) — mesma forma circular
+// e glow pulsante do nó "nota" (NODE_COLOR/GLOW_COLOR, locais em
+// GraphView.tsx), só que num dourado quente, como um corpo celeste mais
+// luminoso se destacando entre as notas — nunca a mesma cor de nó "nota".
+export const GRAPH_CALIBRE_NODE_COLOR = "#d4a843";
+export const GRAPH_CALIBRE_GLOW_COLOR = "#f0c95f";
+
 // Cor por nível de heading (# até ######) no corpo da nota — índice 0 = H1.
 // Só cor; tamanho de fonte continua definido separadamente em livePreview.ts.
 export const HEADING_COLORS: string[] = [

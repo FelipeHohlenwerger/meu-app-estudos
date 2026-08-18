@@ -21,6 +21,7 @@ O projeto roda tanto como aplicação web local (`npm run dev`, acessada pelo na
 - **Leitor de PDF e EPUB** nativo, com grifos/comentários funcionando sobre o conteúdo importado.
 - **Importação de artigos da web** (convertidos para Markdown editável) e anexos de imagem.
 - **Chat com IA e ações de IA** (resumir, explicar, gerar perguntas) usando a API do Gemini.
+- **Tradução automática** de trechos selecionados, num painel lateral que acompanha a seleção enquanto aberto (detecção de idioma automática, resultado em português) — sem configuração, sem chave de API.
 - **Modo desktop nativo** (Linux/AppImage) além do modo web, sem duplicação de código.
 
 ## Pré-requisitos

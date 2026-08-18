@@ -7,6 +7,7 @@ import TagNoteList from "@/components/TagNoteList";
 import TagFocusPage from "@/components/TagFocusPage";
 import CalibreLibraryPage from "@/components/CalibreLibraryPage";
 import type { CalibreBook } from "@/lib/calibreLibrary";
+import { calibrePseudoFilename } from "@/lib/calibreLink";
 import { StarIcon, type LibraryNote } from "@/components/NoteCard";
 import { buildTagTree, filterTagTree, formatTagLabel, normalizeTagKey, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
@@ -117,20 +118,6 @@ type HomeView =
   | { kind: "favoritesList" }
   | { kind: "calibreLibrary" }
   | { kind: "editor" };
-
-// Formato padrão pra abrir um livro do Calibre com mais de um disponível —
-// EPUB primeiro (mesmo espírito de reflow/tema já usado pros EPUBs de
-// vault), senão o primeiro formato que existir.
-function calibreDefaultFormat(book: CalibreBook): string {
-  return book.formats.includes("EPUB") ? "EPUB" : (book.formats[0] ?? "EPUB");
-}
-
-// Pseudo-filename "calibre:<id>:<FORMAT>" — ver decisão de arquitetura em
-// NotePanel.tsx (isCalibreBook). Única função que constrói essa string, pra
-// nunca divergir entre os vários lugares que precisam abrir um livro.
-function calibrePseudoFilename(book: CalibreBook): string {
-  return `calibre:${book.id}:${calibreDefaultFormat(book)}`;
-}
 
 export default function Home() {
   // Vault ativo — ver src/lib/vaultContext.tsx. `activeVaultId` começa null
@@ -876,6 +863,26 @@ export default function Home() {
     if (isMobile && splitMode) closePanelB();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
+
+  // Modo foco de leitura (só PDF/EPUB do painel A, ver NotePanel.tsx) — só
+  // faz sentido com uma única tela ativa, mesma regra do mobile acima: entrar
+  // em foco com a tela dividida fecha o painel B primeiro.
+  const [readingFocusMode, setReadingFocusMode] = useState(false);
+  function toggleReadingFocusMode() {
+    setReadingFocusMode((prev) => {
+      const next = !prev;
+      if (next && splitMode) closePanelB();
+      return next;
+    });
+  }
+  useEffect(() => {
+    if (!readingFocusMode) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setReadingFocusMode(false);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [readingFocusMode]);
 
   function closePanelA() {
     // Promove o painel B pra posição de A antes de sair da divisão.
@@ -2225,6 +2232,8 @@ export default function Home() {
           onNoteFontChange={handleNoteFontChange}
           onToggleNoteFontOverride={handleToggleNoteFontOverride}
           onCreateNoteFromLink={handleCreateNoteFromLink}
+          focusMode={readingFocusMode}
+          onToggleFocusMode={toggleReadingFocusMode}
         />
         {splitMode && (
           <>

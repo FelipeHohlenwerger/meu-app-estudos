@@ -17,7 +17,7 @@ import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import { drag } from "d3-drag";
 import { select } from "d3-selection";
 import "d3-transition"; // side-effect: adiciona selection.transition(), usado no botão de reset de zoom
-import { GRAPH_SPACE_BACKGROUND, GRAPH_TAG_NODE_COLOR } from "@/lib/colors";
+import { GRAPH_SPACE_BACKGROUND, GRAPH_TAG_NODE_COLOR, GRAPH_CALIBRE_NODE_COLOR, GRAPH_CALIBRE_GLOW_COLOR } from "@/lib/colors";
 import { LayersIcon } from "@/components/SubtemaCard";
 
 // `filename` dobra como "id" genérico do nó — pra um nó kind:"tag" (Modo Mapa
@@ -27,7 +27,11 @@ import { LayersIcon } from "@/components/SubtemaCard";
 // não vale o custo. `kind` ausente (Graph View global, todo nó é sempre uma
 // nota) é tratado como `"note"`, comportamento idêntico ao de antes desta
 // adição — mudança puramente aditiva.
-export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "tag" };
+// "calibre" = livro da biblioteca Calibre (nó sintético gerado em
+// getLocalGraph/getGlobalGraph, vaultIndex.ts — nunca existe na tabela
+// `notes`) — mesmo círculo/glow pulsante de "note", só em dourado
+// (GRAPH_CALIBRE_NODE_COLOR/GLOW), com um ícone de livro dentro.
+export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "tag" | "calibre" };
 // `kind` ausente = `"wikilink"` (único tipo que existia antes desta adição) —
 // mesma lógica de compatibilidade aditiva do `GraphNode.kind` acima.
 export type GraphEdge = { source: string; target: string; kind?: "hierarchy" | "wikilink" };
@@ -42,9 +46,10 @@ type Props = {
   // nó recebe destaque visual (opacidade máxima + anel de contorno), diferente de
   // `centerFilename`, que só controla a geometria do layout radial.
   activeNoteFilename?: string;
-  // Generalizado de onSelectNote(filename) — o único call site existente (Graph
-  // View global, page.tsx) ignora `kind` (lá todo nó é sempre "note").
-  onSelectNode: (id: string, kind: "note" | "tag") => void;
+  // Generalizado de onSelectNote(filename) — page.tsx trata "calibre" igual a
+  // "note" (mesma pseudo-filename "calibre:<id>:<FORMAT>" que um clique em
+  // "[[Título do Livro]]" já produz, ver NotePanel.tsx), só ignora "tag".
+  onSelectNode: (id: string, kind: "note" | "tag" | "calibre") => void;
   // Opcionais — o Modo Mapa de TagFocusPage.tsx não tem um botão de tela
   // cheia próprio (pedido não incluiu isso); Graph View global continua
   // passando os dois sempre, comportamento idêntico a antes desta adição.
@@ -168,6 +173,20 @@ function computeRadialPositions(
   }
 
   return positions;
+}
+
+// Ícone dentro do círculo dourado de um nó "calibre" (ver GraphNode.kind) —
+// `size`/posicionamento seguem o mesmo padrão de LayersIcon (SubtemaCard.tsx)
+// já usado pro nó "tag": um <g translate> externo centraliza o ícone sobre o
+// nó, então o SVG aqui só precisa ocupar seu próprio viewBox 0 0 24 24.
+function BookIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 6.5c-1.6-1-3.8-1.5-6.5-1.5v13c2.7 0 4.9.5 6.5 1.5" />
+      <path d="M12 6.5c1.6-1 3.8-1.5 6.5-1.5v13c-2.7 0-4.9.5-6.5 1.5" />
+      <path d="M12 6.5v13" />
+    </svg>
+  );
 }
 
 function ResetZoomIcon() {
@@ -439,6 +458,10 @@ export default function GraphView({
             <stop offset="0%" stopColor={NODE_COLOR} />
             <stop offset="100%" stopColor="#d7dcff" />
           </radialGradient>
+          <radialGradient id="graph-calibre-core" cx="35%" cy="35%" r="65%">
+            <stop offset="0%" stopColor={GRAPH_CALIBRE_GLOW_COLOR} />
+            <stop offset="100%" stopColor={GRAPH_CALIBRE_NODE_COLOR} />
+          </radialGradient>
         </defs>
 
         <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.k})`}>
@@ -500,6 +523,7 @@ export default function GraphView({
             // reforçando "isto é um agrupamento" com a mesma linguagem visual
             // já usada ali.
             const isTagNode = node.kind === "tag";
+            const isCalibreNode = node.kind === "calibre";
             const tagRingColor = isCenter ? "var(--tag-link-color)" : GRAPH_TAG_NODE_COLOR;
             const iconSize = radius * 1.3;
             return (
@@ -521,6 +545,31 @@ export default function GraphView({
                     <circle r={radius} fill={GRAPH_SPACE_BACKGROUND} stroke={tagRingColor} strokeWidth={2} />
                     <g transform={`translate(${-iconSize / 2}, ${-iconSize / 2})`} style={{ color: tagRingColor }}>
                       <LayersIcon size={iconSize} />
+                    </g>
+                  </>
+                ) : isCalibreNode ? (
+                  <>
+                    {/* Mesmo glow pulsante do nó "nota" (graph-node-glow), só
+                        em dourado — "corpo celeste" mais luminoso, nunca a
+                        mesma cor de nota. */}
+                    <circle
+                      className="graph-node-glow"
+                      r={radius * 2.2}
+                      fill={GRAPH_CALIBRE_GLOW_COLOR}
+                      filter="url(#graph-star-glow)"
+                      style={{
+                        animationDuration: `${pulseDuration}s`,
+                        animationDelay: `${pulseDelay}s`,
+                      }}
+                    />
+                    <circle
+                      r={radius}
+                      fill="url(#graph-calibre-core)"
+                      stroke={isActive ? HIGHLIGHT_RING_COLOR : "none"}
+                      strokeWidth={2}
+                    />
+                    <g transform={`translate(${-iconSize / 2}, ${-iconSize / 2})`} style={{ color: GRAPH_SPACE_BACKGROUND }}>
+                      <BookIcon size={iconSize} />
                     </g>
                   </>
                 ) : (
@@ -551,6 +600,25 @@ export default function GraphView({
           })}
         </g>
       </svg>
+
+      {nodes.length === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+            padding: "1rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", maxWidth: "260px" }}>
+            {scope === "local" ? "Nenhuma conexão encontrada pra este item." : "Nenhuma nota encontrada neste vault."}
+          </p>
+        </div>
+      )}
 
       <div style={{ position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px" }}>
         {onToggleFullscreen && (

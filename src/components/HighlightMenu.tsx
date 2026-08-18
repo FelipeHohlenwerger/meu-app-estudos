@@ -18,6 +18,7 @@ type Props = {
   onRemove?: () => void;
   onComment?: (tipo: string) => void;
   onAiAction?: (action: AiAction) => void;
+  onTranslate?: () => void;
   onClose?: () => void;
   // Clique dentro deste elemento não fecha o menu, mesmo fora do próprio
   // menu — usado pelo NotePanel.tsx pra excluir o editor CodeMirror, que já
@@ -31,7 +32,7 @@ type Props = {
   initialModo?: "fundo" | "sublinhado" | "comentario";
 };
 
-export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onAiAction, onClose, getExcludedElement, initialTipo, initialModo }: Props) {
+export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onAiAction, onTranslate, onClose, getExcludedElement, initialTipo, initialModo }: Props) {
   const [modo, setModo] = useState<"fundo" | "sublinhado" | "comentario">(initialModo ?? "fundo");
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -122,7 +123,7 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
               cursor: "pointer",
             }}
           >
-            💬 Comentar
+            Comentar
           </button>
         )}
       </div>
@@ -154,7 +155,7 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
       </div>
       )}
 
-      {onAiAction && (
+      {(onAiAction || onTranslate) && (
         <div
           style={{
             display: "flex",
@@ -163,51 +164,72 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
             ...(onSelect ? { marginTop: "0.5rem", paddingTop: "0.5rem", borderTop: "1px solid var(--panel-border)" } : {}),
           }}
         >
-          <button
-            onClick={() => onAiAction("resumir")}
-            style={{
-              padding: "0.3rem 0.6rem",
-              fontSize: "12px",
-              textAlign: "left",
-              background: "transparent",
-              border: "1px solid var(--panel-border)",
-              borderRadius: "4px",
-              color: "var(--foreground)",
-              cursor: "pointer",
-            }}
-          >
-            ✨ Resumir
-          </button>
-          <button
-            onClick={() => onAiAction("explicar")}
-            style={{
-              padding: "0.3rem 0.6rem",
-              fontSize: "12px",
-              textAlign: "left",
-              background: "transparent",
-              border: "1px solid var(--panel-border)",
-              borderRadius: "4px",
-              color: "var(--foreground)",
-              cursor: "pointer",
-            }}
-          >
-            ✨ Explicar
-          </button>
-          <button
-            onClick={() => onAiAction("perguntas")}
-            style={{
-              padding: "0.3rem 0.6rem",
-              fontSize: "12px",
-              textAlign: "left",
-              background: "transparent",
-              border: "1px solid var(--panel-border)",
-              borderRadius: "4px",
-              color: "var(--foreground)",
-              cursor: "pointer",
-            }}
-          >
-            ✨ Gerar perguntas de revisão
-          </button>
+          {onAiAction && (
+            <>
+              <button
+                onClick={() => onAiAction("resumir")}
+                style={{
+                  padding: "0.3rem 0.6rem",
+                  fontSize: "12px",
+                  textAlign: "left",
+                  background: "transparent",
+                  border: "1px solid var(--panel-border)",
+                  borderRadius: "4px",
+                  color: "var(--foreground)",
+                  cursor: "pointer",
+                }}
+              >
+                ✨ Resumir
+              </button>
+              <button
+                onClick={() => onAiAction("explicar")}
+                style={{
+                  padding: "0.3rem 0.6rem",
+                  fontSize: "12px",
+                  textAlign: "left",
+                  background: "transparent",
+                  border: "1px solid var(--panel-border)",
+                  borderRadius: "4px",
+                  color: "var(--foreground)",
+                  cursor: "pointer",
+                }}
+              >
+                ✨ Explicar
+              </button>
+              <button
+                onClick={() => onAiAction("perguntas")}
+                style={{
+                  padding: "0.3rem 0.6rem",
+                  fontSize: "12px",
+                  textAlign: "left",
+                  background: "transparent",
+                  border: "1px solid var(--panel-border)",
+                  borderRadius: "4px",
+                  color: "var(--foreground)",
+                  cursor: "pointer",
+                }}
+              >
+                ✨ Gerar perguntas de revisão
+              </button>
+            </>
+          )}
+          {onTranslate && (
+            <button
+              onClick={onTranslate}
+              style={{
+                padding: "0.3rem 0.6rem",
+                fontSize: "12px",
+                textAlign: "left",
+                background: "transparent",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "4px",
+                color: "var(--foreground)",
+                cursor: "pointer",
+              }}
+            >
+              🌐 Traduzir
+            </button>
+          )}
         </div>
       )}
 

@@ -100,6 +100,25 @@ type Props = {
   sourceUrl?: string;
   linkLabel?: string;
   calibreId?: number;
+  // Espelha a posição atual (ex: "Capítulo 3 de 12") pra fora — quem monta
+  // este componente (NotePanel.tsx) mostra esse texto na linha compacta do
+  // cabeçalho, em vez deste componente renderizar sua própria linha.
+  onPositionChange?: (label: string) => void;
+  // Clique/tecla dentro do conteúdo do livro (iframe próprio, ver comentário
+  // grande sobre rendition.hooks.content.register abaixo) — um clique ali
+  // NUNCA borbulha pro document externo (isolamento normal de iframe), então
+  // popups flutuantes fora deste componente que fecham "ao clicar fora"
+  // escutando o document de fora (ex: o menu de tipo de comentário em
+  // BookCommentsPanel.tsx) nunca veriam um clique que caiu em cima do
+  // conteúdo do livro sem este retransmissor.
+  onContentInteraction?: () => void;
+  // Clique em "Traduzir" no menu de seleção — pede pro pai (NotePanel.tsx)
+  // abrir/reabastecer o painel lateral de tradução com este trecho.
+  onOpenTranslate?: (texto: string) => void;
+  // Toda seleção finalizada (rendition.on("selected")), independente de
+  // abrir ou não o menu de IA — o pai decide se age (só se o painel de
+  // tradução já estiver aberto, ver scheduleTranslateUpdate).
+  onSelectionChange?: (texto: string) => void;
 };
 
 export type EpubViewerHandle = {
@@ -115,6 +134,10 @@ export type EpubViewerHandle = {
   // Só o capítulo atualmente aberto — alternativa mais leve quando o livro
   // inteiro excede o limite de contexto do chat.
   getCurrentChapterText: () => Promise<string>;
+  // Copia "[[livro#capN]]" do capítulo atual — chamado pelo menu "⋯" de
+  // NotePanel.tsx (o botão "Copiar link" não vive mais dentro deste
+  // componente, ver cabeçalho compacto).
+  copyCurrentLink: () => void;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,12 +170,22 @@ async function extractSectionText(section: any, request: (path: string) => Promi
 // página normal — e continua funcionando agora, porque o novo listener
 // (rendition.on("selected")) nunca toca na seleção, só lê.
 const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
-  { filename, theme, initialChapter, onMarkerClick, sourceUrl, linkLabel, calibreId },
+  {
+    filename,
+    theme,
+    initialChapter,
+    onMarkerClick,
+    sourceUrl,
+    linkLabel,
+    calibreId,
+    onPositionChange,
+    onContentInteraction,
+    onOpenTranslate,
+    onSelectionChange,
+  },
   ref
 ) {
   const { vaultId, vaultFetch } = useVault();
-  const [chapterLabel, setChapterLabel] = useState("");
-  const [linkCopied, setLinkCopied] = useState(false);
   const [aiMenu, setAiMenu] = useState<{ x: number; y: number; cfiRange: string; texto: string } | null>(null);
   const [aiStatus, setAiStatus] = useState<{ x: number; y: number; state: "loading" | "error"; message?: string } | null>(null);
 
@@ -168,6 +201,14 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   const currentChapterRef = useRef<number | null>(null);
   const onMarkerClickRef = useRef(onMarkerClick);
   onMarkerClickRef.current = onMarkerClick;
+  const onPositionChangeRef = useRef(onPositionChange);
+  onPositionChangeRef.current = onPositionChange;
+  const onContentInteractionRef = useRef(onContentInteraction);
+  onContentInteractionRef.current = onContentInteraction;
+  const onOpenTranslateRef = useRef(onOpenTranslate);
+  onOpenTranslateRef.current = onOpenTranslate;
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
 
   useImperativeHandle(ref, () => ({
     goToCfi(cfi: string) {
@@ -196,14 +237,11 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       if (!section) return "";
       return extractSectionText(section, book.load.bind(book));
     },
+    copyCurrentLink() {
+      if (!currentChapterRef.current) return;
+      navigator.clipboard.writeText(`[[${linkLabel ?? filename}#cap${currentChapterRef.current}]]`);
+    },
   }));
-
-  function handleCopyLink() {
-    if (!currentChapterRef.current) return;
-    navigator.clipboard.writeText(`[[${linkLabel ?? filename}#cap${currentChapterRef.current}]]`);
-    setLinkCopied(true);
-    setTimeout(() => setLinkCopied(false), 1500);
-  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function resolveChapterHref(book: any, chapter: number): string | undefined {
@@ -255,13 +293,23 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     }
   }
 
+  // Clique em "Traduzir" — diferente de handleAiAction, não faz nada aqui
+  // além de avisar o pai (NotePanel.tsx), que é quem possui o painel lateral
+  // de tradução e a lógica de buscar/atualizar (ver onOpenTranslate acima).
+  function handleTranslate() {
+    if (!aiMenu) return;
+    const { texto } = aiMenu;
+    setAiMenu(null);
+    onOpenTranslateRef.current?.(texto);
+  }
+
   useEffect(() => {
     let cancelled = false;
     let book: ReturnType<typeof import("epubjs").default> | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const contentCloseListeners: { contents: any; type: "mousedown" | "keydown"; handler: (e: Event) => void }[] = [];
+    const contentCloseListeners: { contents: any; type: "mousedown" | "keydown" | "mouseup"; handler: (e: Event) => void }[] = [];
 
     (async () => {
       const container = containerRef.current;
@@ -332,9 +380,15 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // fechar o menu não funcionaria.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rendition.hooks.content.register((contents: any) => {
-        const mouseHandler = () => setAiMenu(null);
+        const mouseHandler = () => {
+          setAiMenu(null);
+          onContentInteractionRef.current?.();
+        };
         const keyHandler = (e: Event) => {
-          if ((e as KeyboardEvent).key === "Escape") setAiMenu(null);
+          if ((e as KeyboardEvent).key === "Escape") {
+            setAiMenu(null);
+            onContentInteractionRef.current?.();
+          }
         };
         contents.document.addEventListener("mousedown", mouseHandler);
         contents.document.addEventListener("keydown", keyHandler);
@@ -369,18 +423,20 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
         const chapterNumber = location.start.index + 1;
         const total = (book!.spine as unknown as { length: number }).length;
         currentChapterRef.current = chapterNumber;
-        setChapterLabel(`Capítulo ${chapterNumber} de ${total}`);
+        onPositionChangeRef.current?.(`Capítulo ${chapterNumber} de ${total}`);
       });
 
       // Seleção de texto finalizada — evento de alto nível do próprio
-      // epub.js (ver comentário grande acima do componente: seguro, só lê a
-      // seleção, nunca a reseta). Abre o menu com as 3 ações de IA.
+      // epub.js (seguro, só lê a seleção, nunca a reseta). Abre o menu com
+      // as ações disponíveis (destaque/comentar não se aplicam ao EPUB, só
+      // IA e tradução).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rendition.on("selected", (cfiRange: string, contents: any) => {
         const selection = contents.window?.getSelection?.();
         if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
         const texto = selection.toString();
         if (!texto.trim()) return;
+        onSelectionChangeRef.current?.(texto);
         const range = selection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
         const iframe = contents.document?.defaultView?.frameElement as HTMLIFrameElement | undefined;
@@ -472,30 +528,18 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.5rem 0", flexShrink: 0 }}>
-        <span style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>{chapterLabel}</span>
-        <button
-          className="toolbar-link"
-          onClick={handleCopyLink}
-          style={{
-            padding: "0.3rem 0.6rem",
-            borderRadius: "4px",
-            border: "1px solid var(--panel-border)",
-            background: "transparent",
-            cursor: "pointer",
-            fontSize: "0.8rem",
-          }}
-        >
-          {linkCopied ? "Copiado!" : "Copiar link deste capítulo"}
-        </button>
-      </div>
-
       <div ref={containerRef} style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <div ref={viewerRef} style={{ flex: 1, minHeight: 0, minWidth: 0 }} />
       </div>
 
       {aiMenu && (
-        <HighlightMenu x={aiMenu.x} y={aiMenu.y} onAiAction={handleAiAction} onClose={() => setAiMenu(null)} />
+        <HighlightMenu
+          x={aiMenu.x}
+          y={aiMenu.y}
+          onAiAction={handleAiAction}
+          onTranslate={handleTranslate}
+          onClose={() => setAiMenu(null)}
+        />
       )}
       {aiStatus && <AiStatusBadge x={aiStatus.x} y={aiStatus.y} state={aiStatus.state} message={aiStatus.message} />}
     </div>

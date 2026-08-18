@@ -5,6 +5,9 @@ import { extractLinkTargets, findBlockMarkers } from "@/lib/wikiLinkSyntax";
 import { getVaultById } from "@/lib/vaultRegistry";
 import { contentTypeFor, defaultStatusFor, statusOrderFor, type ContentType } from "@/lib/noteStatus";
 import { IMAGE_REGEX } from "@/lib/imageSyntax";
+import type { CalibreBook } from "@/lib/calibreLibrary";
+import { calibrePseudoFilename } from "@/lib/calibreLink";
+import { getLinkedBooksForNotes, getLinkedNotes } from "@/lib/calibreAnnotations";
 
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
@@ -1039,7 +1042,10 @@ export function resolveBlockRefs(vaultId: string, refs: { noteRaw: string; block
   });
 }
 
-export type GraphNode = { filename: string; title: string; tag: string | null };
+// `kind` ausente = nota comum (compatível com o formato de antes desta
+// adição) — "calibre" só aparece nos nós sintéticos gerados por
+// addCalibreConnections abaixo, nunca vem de `notes`.
+export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "calibre" };
 export type GraphEdge = { source: string; target: string };
 
 // Metadado de nó pro grafo: filename/título/tag principal (primeira tag
@@ -1067,8 +1073,90 @@ function dedupedResolvedLinks(conn: DatabaseSync): { source_note_id: number; tar
     .all() as { source_note_id: number; target_note_id: number }[];
 }
 
+// Links cujo alvo NUNCA resolve via resolveTargetNoteId (só conhece a tabela
+// `notes` deste vault) — entre eles, todo link "[[Título de Livro]]" pra um
+// livro do Calibre (o texto inserido é o TÍTULO, ver confirmLink em
+// NotePanel.tsx; a pseudo-filename "calibre:<id>:<FORMATO>" só existe
+// client-side). `sourceNoteIds` opcional restringe a busca (usado pelo grafo
+// Local, que só quer os links dos nós já visitados pela BFS).
+function getUnresolvedLinkRows(
+  conn: DatabaseSync,
+  sourceNoteIds?: number[]
+): { source_note_id: number; target_raw: string }[] {
+  if (sourceNoteIds) {
+    if (sourceNoteIds.length === 0) return [];
+    const placeholders = sourceNoteIds.map(() => "?").join(",");
+    return conn
+      .prepare(`SELECT source_note_id, target_raw FROM links WHERE target_note_id IS NULL AND source_note_id IN (${placeholders})`)
+      .all(...sourceNoteIds) as { source_note_id: number; target_raw: string }[];
+  }
+  return conn
+    .prepare("SELECT source_note_id, target_raw FROM links WHERE target_note_id IS NULL")
+    .all() as { source_note_id: number; target_raw: string }[];
+}
+
+// Passo aditivo pro grafo: acrescenta nós/arestas de livro do Calibre pras
+// notas em `noteIds`, unindo DUAS fontes (deduplicadas entre si por chave de
+// aresta não-direcionada, mesmo padrão das arestas nota-nota):
+//   (a) link "[[Título do Livro]]" no texto — nunca resolve via
+//       resolveTargetNoteId (só conhece a tabela `notes`), ver
+//       getUnresolvedLinkRows;
+//   (b) vínculo explícito do botão "Vincular" (metadado puro,
+//       calibre_book_note_links em calibreAnnotations.ts — nunca aparece na
+//       tabela `links`).
+// As duas usam a MESMA pseudo-filename "calibre:<id>:<FORMATO>" que um
+// clique em "[[Título]]" já produziria — o clique no nó funciona sem
+// nenhuma mudança em GraphView.tsx/page.tsx. `addedNode`/`seenEdge` vêm de
+// fora pra permitir que quem chama (ex: getLocalGraph centrado num livro)
+// já tenha semeado a aresta central antes de rodar este enriquecimento,
+// evitando duplicar a mesma conexão.
+function addCalibreConnections(
+  conn: DatabaseSync,
+  vaultId: string,
+  noteIds: number[],
+  filenameById: Map<number, string>,
+  calibreBooks: CalibreBook[],
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  addedNode: Set<string>,
+  seenEdge: Set<string>
+): void {
+  if (calibreBooks.length === 0 || noteIds.length === 0) return;
+  const byTitle = new Map(calibreBooks.map((b) => [b.title.toLowerCase(), b]));
+  const byId = new Map(calibreBooks.map((b) => [b.id, b]));
+
+  function addConnection(source: string, book: CalibreBook) {
+    const target = calibrePseudoFilename(book);
+    if (!addedNode.has(target)) {
+      addedNode.add(target);
+      nodes.push({ filename: target, title: book.title, tag: null, kind: "calibre" });
+    }
+    const edgeKey = [source, target].sort().join("|");
+    if (seenEdge.has(edgeKey)) return;
+    seenEdge.add(edgeKey);
+    edges.push({ source, target });
+  }
+
+  for (const row of getUnresolvedLinkRows(conn, noteIds)) {
+    const book = byTitle.get(row.target_raw.toLowerCase());
+    const source = filenameById.get(row.source_note_id);
+    if (book && source) addConnection(source, book);
+  }
+
+  const noteFilenames = noteIds.map((id) => filenameById.get(id)).filter((f): f is string => !!f);
+  for (const [noteFilename, bookIds] of getLinkedBooksForNotes(vaultId, noteFilenames)) {
+    for (const bookId of bookIds) {
+      const book = byId.get(bookId);
+      if (book) addConnection(noteFilename, book);
+    }
+  }
+}
+
 // Grafo do vault inteiro: todas as notas (mesmo sem tag/link) + todos os links resolvidos.
-export function getGlobalGraph(vaultId: string): { nodes: GraphNode[]; edges: GraphEdge[] } {
+// `calibreBooks` é opcional (buscar a biblioteca é assíncrono — quem chama já
+// tem esse resultado em mãos, ex. src/app/api/graph/route.ts) — omitido, o
+// grafo continua exatamente como antes (sem nós de livro do Calibre).
+export function getGlobalGraph(vaultId: string, calibreBooks: CalibreBook[] = []): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const conn = getDb(vaultId);
   const nodeMeta = getGraphNodeMeta(conn);
   const nodes: GraphNode[] = nodeMeta.map((n) => ({ filename: n.filename, title: n.title, tag: n.tag }));
@@ -1086,24 +1174,46 @@ export function getGlobalGraph(vaultId: string): { nodes: GraphNode[]; edges: Gr
     edges.push({ source, target });
   }
 
+  const addedNode = new Set(nodes.map((n) => n.filename));
+  addCalibreConnections(conn, vaultId, nodeMeta.map((n) => n.id), byId, calibreBooks, nodes, edges, addedNode, new Set());
+
   return { nodes, edges };
 }
 
-// Grafo local: a nota `filename` + vizinhos até `maxDepth` graus de distância,
-// tratando os links como não-direcionados (uma "conexão", não importa quem
-// escreveu o "[[...]]").
-export function getLocalGraph(vaultId: string, filename: string, maxDepth = 2): { nodes: GraphNode[]; edges: GraphEdge[] } {
+// Grafo local: o item `filename` (nota OU pseudo-filename "calibre:<id>:
+// <FORMATO>", ver isCalibreBook em NotePanel.tsx) + vizinhos até `maxDepth`
+// graus de distância, tratando os links como não-direcionados (uma
+// "conexão", não importa quem escreveu o "[[...]]" ou clicou "Vincular").
+//
+// Centrado num LIVRO: em vez de buscar `filename` na tabela `notes` (nunca
+// vai achar — um livro do Calibre não é uma nota), busca ao contrário —
+// quais notas linkam/vinculam a ESTE livro — e usa essas notas como o
+// primeiro anel (equivalente ao centerNote.id do caso normal), seguindo daí
+// a MESMA BFS de sempre. Sem isso, abrir o Graph View de dentro de um livro
+// sempre voltava vazio (não por bug na BFS — o centro simplesmente nunca era
+// encontrado), ver plano da rodada anterior.
+export function getLocalGraph(
+  vaultId: string,
+  filename: string,
+  maxDepth = 2,
+  calibreBooks: CalibreBook[] = []
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const conn = getDb(vaultId);
   const nodeMeta = getGraphNodeMeta(conn);
   const byFilename = new Map(nodeMeta.map((n) => [n.filename.toLowerCase(), n]));
-  const centerNode = byFilename.get(filename.toLowerCase());
-  if (!centerNode) {
+  const byId = new Map(nodeMeta.map((n) => [n.id, n]));
+  const filenameById = new Map(nodeMeta.map((n) => [n.id, n.filename]));
+
+  const calibreCenterMatch = filename.match(/^calibre:(\d+):/);
+  const centerCalibreId = calibreCenterMatch ? Number(calibreCenterMatch[1]) : null;
+  const centerNote = centerCalibreId === null ? byFilename.get(filename.toLowerCase()) : undefined;
+  const centerBook = centerCalibreId !== null ? calibreBooks.find((b) => b.id === centerCalibreId) : undefined;
+
+  if ((centerCalibreId === null && !centerNote) || (centerCalibreId !== null && !centerBook)) {
     return { nodes: [], edges: [] };
   }
 
-  const byId = new Map(nodeMeta.map((n) => [n.id, n]));
   const linkRows = dedupedResolvedLinks(conn);
-
   const adjacency = new Map<number, Set<number>>();
   for (const row of linkRows) {
     if (row.source_note_id === row.target_note_id) continue;
@@ -1113,8 +1223,43 @@ export function getLocalGraph(vaultId: string, filename: string, maxDepth = 2): 
     adjacency.get(row.target_note_id)!.add(row.source_note_id);
   }
 
-  const visited = new Set<number>([centerNode.id]);
-  let frontier = [centerNode.id];
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
+  const addedNode = new Set<string>();
+  const calibreEdgeSeen = new Set<string>();
+
+  let visited: Set<number>;
+  let frontier: number[];
+
+  if (centerBook) {
+    nodes.push({ filename, title: centerBook.title, tag: null, kind: "calibre" });
+    addedNode.add(filename);
+
+    const linkingIds = new Set<number>();
+    const titleLower = centerBook.title.toLowerCase();
+    for (const row of getUnresolvedLinkRows(conn)) {
+      if (row.target_raw.toLowerCase() === titleLower) linkingIds.add(row.source_note_id);
+    }
+    for (const link of getLinkedNotes(centerCalibreId!)) {
+      if (link.vaultId !== vaultId) continue; // grafo é por vault, ver getGraphNodeMeta
+      const note = byFilename.get(link.filename.toLowerCase());
+      if (note) linkingIds.add(note.id);
+    }
+
+    for (const id of linkingIds) {
+      const note = byId.get(id);
+      if (!note) continue;
+      edges.push({ source: filename, target: note.filename });
+      calibreEdgeSeen.add([filename, note.filename].sort().join("|"));
+    }
+
+    visited = new Set(linkingIds);
+    frontier = Array.from(linkingIds);
+  } else {
+    visited = new Set([centerNote!.id]);
+    frontier = [centerNote!.id];
+  }
+
   for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
     const next: number[] = [];
     for (const id of frontier) {
@@ -1128,24 +1273,30 @@ export function getLocalGraph(vaultId: string, filename: string, maxDepth = 2): 
     frontier = next;
   }
 
-  const nodes: GraphNode[] = [];
   for (const id of visited) {
     const meta = byId.get(id);
     if (meta) nodes.push({ filename: meta.filename, title: meta.title, tag: meta.tag });
   }
 
   const seenEdges = new Set<string>();
-  const edges: GraphEdge[] = [];
   for (const row of linkRows) {
     if (!visited.has(row.source_note_id) || !visited.has(row.target_note_id)) continue;
-    const source = byId.get(row.source_note_id)?.filename;
-    const target = byId.get(row.target_note_id)?.filename;
+    const source = filenameById.get(row.source_note_id);
+    const target = filenameById.get(row.target_note_id);
     if (!source || !target || source === target) continue;
     const key = [source, target].sort().join("|");
     if (seenEdges.has(key)) continue;
     seenEdges.add(key);
     edges.push({ source, target });
   }
+
+  // Livros do Calibre entram como folha de quem já está em `visited` — não
+  // têm link de saída próprio pra seguir, então isso não muda a BFS/profundidade,
+  // só acrescenta os nós/arestas que a busca acima não pode enxergar (ver
+  // addCalibreConnections). `addedNode`/`calibreEdgeSeen` já semeados acima
+  // com o próprio livro central (se aplicável), pra não duplicar a aresta
+  // livro↔nota já adicionada.
+  addCalibreConnections(conn, vaultId, Array.from(visited), filenameById, calibreBooks, nodes, edges, addedNode, calibreEdgeSeen);
 
   return { nodes, edges };
 }

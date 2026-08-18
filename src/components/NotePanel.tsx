@@ -42,8 +42,10 @@ import { StarIcon } from "@/components/NoteCard";
 import PdfNativeViewer from "@/components/PdfNativeViewer";
 import EpubViewer, { type EpubViewerHandle } from "@/components/EpubViewer";
 import BookCommentsPanel from "@/components/BookCommentsPanel";
+import LinkBookModal from "@/components/LinkBookModal";
 import ChatPanel from "@/components/ChatPanel";
 import AiStatusBadge from "@/components/AiStatusBadge";
+import TranslatePanel from "@/components/TranslatePanel";
 import { extractBlockRefs, findBlockMarkers } from "@/lib/wikiLinkSyntax";
 import {
   buildImageSyntax,
@@ -57,10 +59,12 @@ import {
 } from "@/lib/imageSyntax";
 import { extractHighlightEntries, generateHighlightsPdf } from "@/lib/exportHighlights";
 import { requestAiAction, type AiAction } from "@/lib/aiActions";
+import { requestTranslation } from "@/lib/translate";
 import { calloutColorsPalette } from "@/lib/colors";
 import { uploadAndSetCover, removeCover } from "@/lib/coverActions";
 import { useVault } from "@/lib/vaultContext";
 import type { CalibreBook } from "@/lib/calibreLibrary";
+import { calibrePseudoFilename } from "@/lib/calibreLink";
 import { cssVarForFont, type NoteFontId } from "@/lib/fonts";
 
 const customHighlightStyle = HighlightStyle.define([
@@ -153,6 +157,55 @@ function stripMdExtension(filename: string): string {
   return filename.replace(/\.(md|pdf|epub)$/i, "");
 }
 
+// Ícone de lápis (mesmo desenho do "Pencil" do Lucide, redesenhado à mão
+// aqui — o projeto não depende do pacote lucide-react, todo ícone é um SVG
+// local no mesmo estilo, ver FocusModeIcon logo abaixo) — usado no botão
+// flutuante de novo comentário. Antes era o emoji "💬", que renderizava como
+// um retângulo genérico em sistemas sem fonte de emoji instalada.
+function PencilIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+      <path d="m15 5 4 4" />
+    </svg>
+  );
+}
+
+// Mesmo desenho/espírito do FullscreenIcon de GraphView.tsx (setas pra fora
+// vs pra dentro) — duplicado aqui (componente pequeno, sem props em comum
+// suficientes pra valer a pena extrair um compartilhado) pro botão de modo
+// foco do visualizador PDF/EPUB.
+function FocusModeIcon({ active }: { active: boolean }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  if (active) {
+    return (
+      <svg {...common}>
+        <path d="M9 3v4a2 2 0 0 1-2 2H3" />
+        <path d="M21 9h-4a2 2 0 0 1-2-2V3" />
+        <path d="M3 15h4a2 2 0 0 1 2 2v4" />
+        <path d="M15 21v-4a2 2 0 0 1 2-2h4" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  );
+}
+
 // Largura confortável de leitura, já validada pro corpo `.md` (coluna
 // centralizada em vez da largura inteira do painel) — reaproveitada também
 // pelo visualizador de PDF/EPUB (ver viewerKind), que antes não tinha
@@ -222,6 +275,11 @@ type NotePanelProps = {
   onNoteFontChange: (filename: string | null, font: NoteFontId) => void;
   onToggleNoteFontOverride: (filename: string, checked: boolean, currentFont: NoteFontId) => void;
   onCreateNoteFromLink: (title: string) => Promise<string | null>;
+  // Modo foco de leitura (só faz sentido pra PDF/EPUB, ver viewerKind) — o
+  // estado mora em page.tsx (precisa saber fechar a tela dividida ao entrar,
+  // mesmo espírito de graphFullscreen); este painel só liga/desliga.
+  focusMode?: boolean;
+  onToggleFocusMode?: () => void;
 };
 
 // Botões da folha "Mais opções" do mobile (ver mobileToolsOpen) — mesmo
@@ -269,10 +327,12 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onToggleNoteFontOverride,
     onCreateNoteFromLink,
     onFavoriteChanged,
+    focusMode,
+    onToggleFocusMode,
   },
   ref
 ) {
-  const { vaultFetch } = useVault();
+  const { vaultId, vaultFetch } = useVault();
   const [content, setContent] = useState("");
   const [noteTags, setNoteTags] = useState<string[]>([]);
   const [status, setStatus] = useState("");
@@ -292,25 +352,91 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
   // Painel único de comentários (ancorados + gerais) — ver BookCommentsPanel.
   const [showBookComments, setShowBookComments] = useState(false);
+  // Incrementado a cada clique no botão flutuante de comentários do
+  // visualizador (ver abaixo) — BookCommentsPanel usa a MUDANÇA de valor
+  // (não o valor em si) pra abrir o composer de comentário geral direto,
+  // sem precisar de um segundo clique em "+ Novo comentário".
+  const [commentComposeTrigger, setCommentComposeTrigger] = useState(0);
+  // Incrementado a cada clique/tecla dentro do conteúdo do EPUB (retransmitido
+  // via EpubViewer.onContentInteraction — ver comentário lá: um clique que cai
+  // em cima do iframe do livro nunca chega ao document externo sozinho).
+  // BookCommentsPanel usa a MUDANÇA de valor pra fechar o menu de tipo de
+  // comentário (síntese/importante/...) quando aberto, mesmo espírito do
+  // outside-click que já fecha esse menu pro resto da tela.
+  const [closeCommentPickerTrigger, setCloseCommentPickerTrigger] = useState(0);
   const [scrollToCommentId, setScrollToCommentId] = useState<number | null>(null);
   // Menu "⋯" no mobile: agrupa os controles secundários (inserir imagem, Aa,
   // comentários, chat, exportar destaques, controles de imagem) que no
   // desktop ficam sempre visíveis na linha abaixo do título.
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
-  // Painel de chat com IA — mutuamente exclusivo com o de comentários (nunca
-  // os dois abertos ao mesmo tempo, decisão confirmada com o usuário).
+  // Painel de chat com IA — mutuamente exclusivo com o de comentários e o de
+  // tradução (nunca dois abertos ao mesmo tempo, decisão confirmada com o
+  // usuário).
   const [showChat, setShowChat] = useState(false);
+  // Painel lateral de tradução (ver TranslatePanel.tsx) — diferente de um
+  // popover pontual, fica aberto até a pessoa fechar manualmente e se
+  // atualiza sozinho a cada nova seleção (ver scheduleTranslateUpdate).
+  const [showTranslate, setShowTranslate] = useState(false);
+  const [translateState, setTranslateState] = useState<{
+    status: "loading" | "done" | "error";
+    translatedText?: string;
+    detectedSourceLanguage?: string;
+    message?: string;
+  } | null>(null);
+  const translateDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Diferente de handleAiAction, nunca insere nada na nota: usa o endpoint
+  // gratuito do Google Tradutor, sem chave (ver translateServer.ts).
+  async function runTranslate(texto: string) {
+    if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
+    setTranslateState({ status: "loading" });
+    try {
+      const { translatedText, detectedSourceLanguage } = await requestTranslation(texto);
+      setTranslateState({ status: "done", translatedText, detectedSourceLanguage });
+    } catch (err) {
+      setTranslateState({ status: "error", message: err instanceof Error ? err.message : "Erro ao traduzir" });
+    }
+  }
+  function openTranslatePanel(texto: string) {
+    setShowBookComments(false);
+    setShowChat(false);
+    setShowTranslate(true);
+    runTranslate(texto);
+  }
+  function closeTranslatePanel() {
+    setShowTranslate(false);
+    setTranslateState(null);
+    if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
+  }
+  // Chamada tanto pelo watcher de seleção do CodeMirror quanto pelo callback
+  // onSelectionChange do EpubViewer — só agenda se o painel já estiver
+  // aberto (senão qualquer seleção no app dispararia chamadas à toa).
+  function scheduleTranslateUpdate(texto: string) {
+    if (!showTranslate) return;
+    if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
+    translateDebounceRef.current = setTimeout(() => runTranslate(texto), 400);
+  }
+  useEffect(() => {
+    return () => {
+      if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
+    };
+  }, []);
   function toggleBookComments() {
     setShowBookComments((prev) => {
       const next = !prev;
-      if (next) setShowChat(false);
+      if (next) {
+        setShowChat(false);
+        closeTranslatePanel();
+      }
       return next;
     });
   }
   function toggleChat() {
     setShowChat((prev) => {
       const next = !prev;
-      if (next) setShowBookComments(false);
+      if (next) {
+        setShowBookComments(false);
+        closeTranslatePanel();
+      }
       return next;
     });
   }
@@ -322,6 +448,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
   const [titleDraft, setTitleDraft] = useState("");
   const [backlinks, setBacklinks] = useState<string[]>([]);
+  const [linkedBooks, setLinkedBooks] = useState<CalibreBook[]>([]);
   const [mentions, setMentions] = useState<{ filename: string; from: number; to: number; matchedText: string }[]>([]);
   const [showMentions, setShowMentions] = useState(false);
 
@@ -407,6 +534,56 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       : filename && /\.epub$/i.test(filename)
         ? "epub"
         : null;
+
+  // Número de página digitado à mão (PDF, ver PdfNativeViewer.tsx — não dá
+  // pra ler a página atual de volta do iframe nativo) — mostrado + editável
+  // na linha compacta do cabeçalho, não mais dentro do próprio visualizador.
+  // Reseta quando um novo link de página é clicado (mesmo gatilho que antes
+  // remontava o visualizador via `key`) ou o arquivo muda.
+  const pdfInitialPage =
+    activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page"
+      ? parseInt(activeViewerAnchor.value, 10) || undefined
+      : undefined;
+  const [pdfPageInput, setPdfPageInput] = useState(pdfInitialPage ?? 1);
+  useEffect(() => {
+    setPdfPageInput(pdfInitialPage ?? 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pdfInitialPage, filename]);
+
+  // Posição textual do EPUB ("Capítulo N de M") — espelhada de dentro do
+  // visualizador via onPositionChange (EpubViewer.tsx), computada a partir
+  // da posição REAL de leitura, ao contrário do número de página do PDF.
+  const [epubPosition, setEpubPosition] = useState("");
+  useEffect(() => {
+    setEpubPosition("");
+  }, [filename]);
+
+  // Rede de segurança: modo foco só faz sentido com viewerKind (o botão de
+  // sair só existe nessa linha do cabeçalho) — se o arquivo aberto deixar de
+  // ser PDF/EPUB enquanto o modo foco está ativo, sai sozinho pra nunca
+  // deixar o overlay em tela cheia sem um jeito de fechar.
+  useEffect(() => {
+    if (focusMode && !viewerKind) onToggleFocusMode?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusMode, viewerKind]);
+  const [linkCopyFeedback, setLinkCopyFeedback] = useState(false);
+
+  function handleCopyPositionLink() {
+    if (viewerKind === "pdf" && filename) {
+      const label = isCalibreBook ? calibreBook?.title ?? filename : filename;
+      navigator.clipboard.writeText(`[[${label}#p${pdfPageInput}]]`);
+    } else if (viewerKind === "epub") {
+      epubViewerRef.current?.copyCurrentLink();
+    } else {
+      return;
+    }
+    setLinkCopyFeedback(true);
+    setTimeout(() => setLinkCopyFeedback(false), 1500);
+  }
+
+  // Modo foco de leitura (só PDF/EPUB) e modal "Vincular a uma nota" (só
+  // livro do Calibre) — ver Partes B/C do plano.
+  const [showLinkModal, setShowLinkModal] = useState(false);
 
   const highlightEntries = useMemo(() => {
     if (!filename || viewerKind) return [];
@@ -684,6 +861,18 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         }
       });
   }, [filename, vaultFetch, isCalibreBook]);
+
+  // Livros do Calibre vinculados a esta nota (ver botão "Vincular" no
+  // visualizador do livro — vínculo é metadado puro, nunca texto na nota).
+  useEffect(() => {
+    if (!filename || isCalibreBook) {
+      setLinkedBooks([]);
+      return;
+    }
+    fetch(`/api/note/calibre-links?vault=${encodeURIComponent(vaultId)}&filename=${encodeURIComponent(filename)}`)
+      .then((res) => res.json())
+      .then((data) => setLinkedBooks(data.books ?? []));
+  }, [filename, vaultId, isCalibreBook]);
 
   // Migração de compatibilidade: comentários ancorados gravados antes do
   // painel unificado existir não têm o "¶id" (não dava pra ordená-los junto
@@ -1204,6 +1393,16 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     }
   }
 
+  function handleTranslate() {
+    const view = editorViewRef.current;
+    if (!view || !menuPos) return;
+    const sel = view.state.selection.main;
+    if (sel.empty) return;
+    const texto = view.state.doc.sliceString(sel.from, sel.to);
+    setMenuPos(null);
+    openTranslatePanel(texto);
+  }
+
   function insertCalloutSlashCommand() {
     const view = editorViewRef.current;
     if (!view) return;
@@ -1306,6 +1505,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         setEditingHighlight(null);
         return;
       }
+      // Acompanha qualquer seleção nova pro painel de tradução (se estiver
+      // aberto) — antes das checagens de sobreposição abaixo, já que a
+      // tradução deve seguir a seleção mesmo em cima de um trecho já
+      // marcado/comentado.
+      scheduleTranslateUpdate(update.state.doc.sliceString(sel.from, sel.to));
       const overlapsHighlight = findHighlightAt(update.view, sel.from) || findHighlightAt(update.view, sel.to);
       const overlapsComment = findCommentAt(update.view, sel.from) || findCommentAt(update.view, sel.to);
       if (overlapsHighlight || overlapsComment) {
@@ -1548,141 +1752,213 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     }
   }
 
+  // Modo foco: em vez de participar do layout flex normal ao lado da
+  // sidebar/segundo painel, o painel inteiro vira um overlay cobrindo a
+  // tela (mesmo truque de z-index já usado pelo Graph View em tela cheia,
+  // ver page.tsx/graphFullscreen) — cobre visualmente o cabeçalho global e a
+  // sidebar sem precisar escondê-los de verdade.
   return (
     <div
       onMouseDownCapture={onFocus}
-      style={{ display: "flex", flex: 1, minWidth: 0, minHeight: 0 }}
+      style={
+        focusMode
+          ? { position: "fixed", inset: 0, zIndex: 3000, background: "var(--background)", display: "flex", minWidth: 0, minHeight: 0 }
+          : { display: "flex", flex: 1, minWidth: 0, minHeight: 0 }
+      }
     >
       <section style={{ flex: 1, display: "flex", position: "relative", minWidth: 0, minHeight: 0 }}>
         <div style={{ flex: 1, padding: "2rem", display: "flex", flexDirection: "column", position: "relative", minWidth: 0, minHeight: 0, overflowY: "auto" }}>
           <div style={{ display: "flex", flexDirection: "column", minHeight: "100%", flexShrink: 0 }}>
           <div style={{ maxWidth: READING_MAX_WIDTH, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-            {filename && (
-              <>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  {isCalibreBook ? (
-                    <div
-                      style={{
-                        fontSize: "1.8em",
-                        fontWeight: "bold",
-                        color: "var(--foreground)",
-                        fontFamily: "inherit",
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {calibreBook?.title ?? "Carregando..."}
-                    </div>
-                  ) : (
-                    <input
-                      ref={titleInputRef}
-                      value={titleDraft}
-                      onChange={(e) => setTitleDraft(e.target.value)}
-                      onBlur={() => renameActiveNote(titleDraft)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === "Tab") {
-                          e.preventDefault();
-                          (e.target as HTMLInputElement).blur();
-                        }
-                      }}
-                      placeholder="Título da nota"
-                      style={{
-                        fontSize: "1.8em",
-                        fontWeight: "bold",
-                        background: "transparent",
-                        border: "none",
-                        outline: "none",
-                        color: "var(--foreground)",
-                        padding: 0,
-                        fontFamily: "inherit",
-                        flex: 1,
-                        minWidth: 0,
-                      }}
-                    />
-                  )}
-                  {!isCalibreBook && (
-                    <button
-                      onClick={handleFavoriteToggle}
-                      className="toolbar-link"
-                      title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
-                      style={{
-                        background: "transparent",
-                        border: "none",
-                        padding: "0.2rem",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        flexShrink: 0,
-                      }}
-                    >
-                      <StarIcon filled={isFavorite} />
-                    </button>
-                  )}
-                  {!isCalibreBook && <TagField tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />}
-                  {!isCalibreBook && (
-                    <button
-                      onClick={(e) => handleCoverButtonClick(e.currentTarget.getBoundingClientRect())}
-                      className="toolbar-link"
-                      title={coverManualPath ? "Trocar ou remover capa" : "Adicionar capa"}
-                      style={{
-                        background: "transparent",
-                        border: "none",
-                        color: "var(--text-muted)",
-                        cursor: "pointer",
-                        fontSize: "0.8rem",
-                        padding: "0.2rem 0.3rem",
-                        flexShrink: 0,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {coverManualPath ? "Capa ✓" : "+ capa"}
-                    </button>
-                  )}
+            {filename && viewerKind && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  marginBottom: "0.75rem",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: focusMode ? "1.1em" : "1.4em",
+                    fontWeight: "bold",
+                    color: "var(--foreground)",
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {isCalibreBook ? calibreBook?.title ?? "Carregando..." : stripMdExtension(filename)}
                 </div>
 
-                {isCalibreBook && (
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
-                    <span
-                      style={{
-                        padding: "0.15rem 0.5rem",
-                        borderRadius: "999px",
-                        border: "1px solid var(--panel-border)",
-                        color: "var(--text-muted)",
-                        fontSize: "0.75rem",
-                      }}
-                    >
-                      Biblioteca Calibre — somente leitura
-                    </span>
-                    {calibreBook && calibreBook.formats.length > 1 && (
-                      <div style={{ display: "flex", gap: "0.3rem" }}>
-                        {calibreBook.formats.map((fmt) => (
-                          <button
-                            key={fmt}
-                            onClick={() => onFilenameChange(`calibre:${calibreId}:${fmt}`)}
-                            className="toolbar-link"
-                            style={{
-                              padding: "0.2rem 0.55rem",
-                              borderRadius: "999px",
-                              border: "1px solid var(--panel-border)",
-                              background: fmt === calibreFormat ? "var(--panel-hover)" : "transparent",
-                              color: fmt === calibreFormat ? "var(--foreground)" : "var(--text-muted)",
-                              fontWeight: fmt === calibreFormat ? "bold" : "normal",
-                              cursor: "pointer",
-                              fontSize: "0.75rem",
-                            }}
-                          >
-                            {fmt}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                {!focusMode && isCalibreBook && (
+                  <span
+                    style={{
+                      padding: "0.15rem 0.5rem",
+                      borderRadius: "999px",
+                      border: "1px solid var(--panel-border)",
+                      color: "var(--text-muted)",
+                      fontSize: "0.75rem",
+                      flexShrink: 0,
+                    }}
+                  >
+                    Calibre
+                  </span>
                 )}
 
-                {!isCalibreBook && noteTags.length > 0 && (
+                {viewerKind === "pdf" && (
+                  <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                    Pág.
+                    <input
+                      type="number"
+                      min={1}
+                      value={pdfPageInput}
+                      onChange={(e) => setPdfPageInput(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      style={{
+                        width: "3.5em",
+                        padding: "0.15rem 0.35rem",
+                        borderRadius: "4px",
+                        border: "1px solid var(--panel-border)",
+                        background: "transparent",
+                        color: "var(--foreground)",
+                      }}
+                    />
+                  </span>
+                )}
+                {viewerKind === "epub" && epubPosition && (
+                  <span style={{ flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>{epubPosition}</span>
+                )}
+
+                {!focusMode && isCalibreBook && (
+                  <button
+                    onClick={() => setShowLinkModal(true)}
+                    className="toolbar-link"
+                    style={{
+                      background: "transparent",
+                      border: "1px solid var(--panel-border)",
+                      borderRadius: "4px",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                      padding: "0.3rem 0.6rem",
+                      fontSize: "0.85rem",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Vincular
+                  </button>
+                )}
+
+                {onToggleFocusMode && (
+                  <button
+                    onClick={onToggleFocusMode}
+                    className="toolbar-link"
+                    title={focusMode ? "Sair do modo foco" : "Modo foco"}
+                    style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0.3rem", display: "flex", alignItems: "center", color: "var(--text-muted)", flexShrink: 0 }}
+                  >
+                    <FocusModeIcon active={!!focusMode} />
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setMobileToolsOpen(true)}
+                  className="toolbar-link"
+                  title="Mais opções"
+                  style={{
+                    background: "transparent",
+                    border: "1px solid var(--panel-border)",
+                    borderRadius: "4px",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                    padding: "0.3rem 0.7rem",
+                    fontSize: "1rem",
+                    flexShrink: 0,
+                    lineHeight: 1,
+                  }}
+                >
+                  ⋯
+                </button>
+                {closable && !focusMode && (
+                  <button
+                    onClick={onClose}
+                    title="Fechar painel"
+                    style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "1.2rem", color: "var(--text-muted)", flexShrink: 0 }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            )}
+
+            {filename && !viewerKind && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <input
+                    ref={titleInputRef}
+                    value={titleDraft}
+                    onChange={(e) => setTitleDraft(e.target.value)}
+                    onBlur={() => renameActiveNote(titleDraft)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === "Tab") {
+                        e.preventDefault();
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                    placeholder="Título da nota"
+                    style={{
+                      fontSize: "1.8em",
+                      fontWeight: "bold",
+                      background: "transparent",
+                      border: "none",
+                      outline: "none",
+                      color: "var(--foreground)",
+                      padding: 0,
+                      fontFamily: "inherit",
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  />
+                  <button
+                    onClick={handleFavoriteToggle}
+                    className="toolbar-link"
+                    title={isFavorite ? "Remover dos favoritos" : "Marcar como favorita"}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      padding: "0.2rem",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <StarIcon filled={isFavorite} />
+                  </button>
+                  <TagField tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />
+                  <button
+                    onClick={(e) => handleCoverButtonClick(e.currentTarget.getBoundingClientRect())}
+                    className="toolbar-link"
+                    title={coverManualPath ? "Trocar ou remover capa" : "Adicionar capa"}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                      fontSize: "0.8rem",
+                      padding: "0.2rem 0.3rem",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {coverManualPath ? "Capa ✓" : "+ capa"}
+                  </button>
+                </div>
+
+                {noteTags.length > 0 && (
                   <div style={{ marginTop: "0.4rem" }}>
                     <TagChips tags={noteTags} allKnownTags={allTags} onChange={handleTagsChange} />
                   </div>
@@ -1699,7 +1975,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                     marginBottom: "0.75rem",
                   }}
                 >
-                  {!isMobile && !viewerKind && (
+                  {!isMobile && (
                     <>
                       <button
                         className="toolbar-link"
@@ -1757,7 +2033,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       Comentários
                     </button>
                   )}
-                  {!isMobile && viewerKind !== "pdf" && (
+                  {!isMobile && (
                     <button
                       onClick={toggleChat}
                       className="toolbar-link"
@@ -1776,7 +2052,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       Chat
                     </button>
                   )}
-                  {!isMobile && !viewerKind && (
+                  {!isMobile && (
                     <button
                       className="toolbar-link"
                       title={highlightEntries.length === 0 ? "Nenhum destaque nesta nota" : "Exportar destaques em PDF"}
@@ -1870,7 +2146,6 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       : undefined
                   }
                   sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
-                  linkLabel={isCalibreBook ? calibreBook?.title : undefined}
                 />
               )}
               {viewerKind === "epub" && (
@@ -1887,6 +2162,10 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
                   linkLabel={isCalibreBook ? calibreBook?.title : undefined}
                   calibreId={isCalibreBook ? calibreId ?? undefined : undefined}
+                  onPositionChange={setEpubPosition}
+                  onContentInteraction={() => setCloseCommentPickerTrigger((t) => t + 1)}
+                  onOpenTranslate={openTranslatePanel}
+                  onSelectionChange={scheduleTranslateUpdate}
                 />
               )}
             </div>
@@ -1974,6 +2253,46 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   </ul>
                 )}
 
+                {linkedBooks.length > 0 && (
+                  <div style={{ marginTop: "1rem" }}>
+                    <h3 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "var(--text-muted)" }}>Livros vinculados</h3>
+                    <ul style={{ listStyle: "none", padding: 0, display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                      {linkedBooks.map((book) => (
+                        <li key={book.id} style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                          <button
+                            onClick={() => onFilenameChange(calibrePseudoFilename(book))}
+                            style={{
+                              padding: "0.3rem 0.6rem",
+                              background: "var(--panel-bg)",
+                              border: "1px solid var(--panel-border)",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              fontSize: "0.85rem",
+                              color: "var(--foreground)",
+                            }}
+                          >
+                            {book.title}
+                          </button>
+                          <button
+                            onClick={async () => {
+                              setLinkedBooks((prev) => prev.filter((b) => b.id !== book.id));
+                              if (!filename) return;
+                              await fetch(
+                                `/api/note/calibre-links?vault=${encodeURIComponent(vaultId)}&filename=${encodeURIComponent(filename)}&calibreId=${book.id}`,
+                                { method: "DELETE" }
+                              );
+                            }}
+                            title="Desvincular"
+                            style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted)" }}
+                          >
+                            ×
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <button
                   onClick={() => setShowMentions((prev) => !prev)}
                   style={{
@@ -2046,6 +2365,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onRemove={editingHighlight ? removeHighlight : undefined}
           onComment={editingHighlight ? undefined : startComment}
           onAiAction={editingHighlight ? undefined : handleAiAction}
+          onTranslate={editingHighlight ? undefined : handleTranslate}
           onClose={() => {
             setMenuPos(null);
             setEditingHighlight(null);
@@ -2165,6 +2485,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           isMobile={isMobile}
           open={showBookComments}
           onClose={() => setShowBookComments(false)}
+          autoComposeTrigger={commentComposeTrigger}
+          closePickerTrigger={closeCommentPickerTrigger}
           anchoredComments={!viewerKind ? anchoredComments : undefined}
           onGoToAnchor={handleGoToAnchor}
           onGoToEpubAnchor={handleGoToEpubAnchor}
@@ -2174,13 +2496,21 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         />
       )}
 
-      {/* Botão flutuante pra abrir o painel de comentários no mobile — no
-          desktop esse gatilho já existe na linha de botões (ver acima); no
-          mobile esses botões viraram o menu "⋯", então isso cobre o caso de
-          querer abrir comentários sem ter clicado num marcador no texto. */}
-      {isMobile && filename && !showBookComments && (
+      {/* Botão flutuante de comentários — no mobile cobre qualquer conteúdo
+          (nota ou visualizador), mesmo espírito de sempre: no desktop, notas
+          já têm o gatilho "Comentários" na linha de botões, mas o
+          visualizador PDF/EPUB (cabeçalho enxuto de propósito, ver Parte A)
+          não tem mais essa linha — por isso o botão também aparece no
+          desktop quando `viewerKind`. Pra `viewerKind`, abre DIRETO no
+          composer de comentário geral (autoComposeTrigger), não só a lista —
+          pra nota comum no mobile, mantém o comportamento de sempre (só abre
+          o painel). */}
+      {filename && !showBookComments && (isMobile || viewerKind) && (
         <button
-          onClick={toggleBookComments}
+          onClick={() => {
+            toggleBookComments();
+            if (viewerKind) setCommentComposeTrigger((t) => t + 1);
+          }}
           title="Comentários"
           style={{
             position: "fixed",
@@ -2194,11 +2524,13 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
             color: "var(--foreground)",
             boxShadow: "0 2px 10px rgba(0,0,0,0.3)",
             cursor: "pointer",
-            fontSize: "1.3rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             zIndex: 1400,
           }}
         >
-          💬
+          <PencilIcon />
         </button>
       )}
 
@@ -2206,7 +2538,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           sempre visíveis na linha abaixo do título (ver mais acima), mais o
           ImageControlPanel contextual — tudo dentro de uma folha só, aberta
           de baixo pra cima. */}
-      {isMobile && mobileToolsOpen && (
+      {mobileToolsOpen && (isMobile || viewerKind) && (
         <>
           <div
             onClick={() => setMobileToolsOpen(false)}
@@ -2289,6 +2621,44 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                 Chat
               </button>
             )}
+            {viewerKind && (
+              <button
+                className="toolbar-link"
+                onClick={() => {
+                  handleCopyPositionLink();
+                  setMobileToolsOpen(false);
+                }}
+                style={mobileToolSheetButtonStyle}
+              >
+                {linkCopyFeedback ? "Copiado!" : viewerKind === "pdf" ? "Copiar link desta página" : "Copiar link deste capítulo"}
+              </button>
+            )}
+            {isCalibreBook && calibreBook && calibreBook.formats.length > 1 && (
+              <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                {calibreBook.formats.map((fmt) => (
+                  <button
+                    key={fmt}
+                    onClick={() => {
+                      setMobileToolsOpen(false);
+                      onFilenameChange(`calibre:${calibreId}:${fmt}`);
+                    }}
+                    className="toolbar-link"
+                    style={{
+                      padding: "0.3rem 0.7rem",
+                      borderRadius: "999px",
+                      border: "1px solid var(--panel-border)",
+                      background: fmt === calibreFormat ? "var(--panel-hover)" : "transparent",
+                      color: fmt === calibreFormat ? "var(--foreground)" : "var(--text-muted)",
+                      fontWeight: fmt === calibreFormat ? "bold" : "normal",
+                      cursor: "pointer",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    {fmt}
+                  </button>
+                ))}
+              </div>
+            )}
             {!viewerKind && (
               <button
                 className="toolbar-link"
@@ -2327,6 +2697,17 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         </>
       )}
 
+      {showLinkModal && isCalibreBook && calibreId !== null && (
+        <LinkBookModal
+          calibreId={calibreId}
+          bookTitle={calibreBook?.title ?? ""}
+          vaultId={vaultId}
+          noteTargets={noteTargets}
+          onCreateNote={onCreateNoteFromLink}
+          onClose={() => setShowLinkModal(false)}
+        />
+      )}
+
       {filename && (
         <ChatPanel
           open={showChat}
@@ -2340,6 +2721,15 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onLibraryChanged={onLibraryChanged}
         />
       )}
+
+      <TranslatePanel
+        open={showTranslate}
+        onClose={closeTranslatePanel}
+        status={translateState?.status ?? null}
+        translatedText={translateState?.translatedText}
+        detectedSourceLanguage={translateState?.detectedSourceLanguage}
+        message={translateState?.message}
+      />
 
       <input
         ref={imageFileInputRef}
