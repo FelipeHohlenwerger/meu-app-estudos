@@ -409,11 +409,15 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   }
   // Chamada tanto pelo watcher de seleção do CodeMirror quanto pelo callback
   // onSelectionChange do EpubViewer — só agenda se o painel já estiver
-  // aberto (senão qualquer seleção no app dispararia chamadas à toa).
+  // aberto (senão qualquer seleção no app dispararia chamadas à toa). 900ms
+  // (não os ~400ms originais) — reduz o volume de chamadas reais em
+  // seleções feitas em sequência rápida; ver também o limitador de
+  // intervalo mínimo e o retry em translateServer.ts (proteção em duas
+  // camadas contra o 429 do endpoint gratuito).
   function scheduleTranslateUpdate(texto: string) {
     if (!showTranslate) return;
     if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
-    translateDebounceRef.current = setTimeout(() => runTranslate(texto), 400);
+    translateDebounceRef.current = setTimeout(() => runTranslate(texto), 900);
   }
   useEffect(() => {
     return () => {
