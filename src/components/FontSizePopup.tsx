@@ -15,6 +15,10 @@ type Props = {
   onFontChange: (font: NoteFontId) => void;
   onToggleFontOverride: (checked: boolean) => void;
   onClose: () => void;
+  // "nota" (padrão) ou "livro" — só muda o texto dos dois checkboxes de
+  // override, pro rótulo fazer sentido também quando aberto de dentro de um
+  // EPUB (mesmo popup, mesmo sistema global+override de fonts.ts).
+  itemLabel?: "nota" | "livro";
 };
 
 const MIN_SIZE = 10;
@@ -32,6 +36,7 @@ export default function FontSizePopup({
   onFontChange,
   onToggleFontOverride,
   onClose,
+  itemLabel = "nota",
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -126,7 +131,7 @@ export default function FontSizePopup({
 
       <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "12px", color: "var(--text-muted)", cursor: "pointer", marginBottom: "0.7rem" }}>
         <input type="checkbox" checked={isOverridden} onChange={(e) => onToggleOverride(e.target.checked)} />
-        Usar este tamanho só nesta nota
+        Usar este tamanho só {itemLabel === "livro" ? "neste livro" : "nesta nota"}
       </label>
 
       <div style={{ borderTop: "1px solid var(--panel-border)", margin: "0 0 0.6rem 0" }} />
@@ -157,7 +162,7 @@ export default function FontSizePopup({
 
       <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "12px", color: "var(--text-muted)", cursor: "pointer" }}>
         <input type="checkbox" checked={isFontOverridden} onChange={(e) => onToggleFontOverride(e.target.checked)} />
-        Usar esta fonte só nesta nota
+        Usar esta fonte só {itemLabel === "livro" ? "neste livro" : "nesta nota"}
       </label>
     </div>
   );

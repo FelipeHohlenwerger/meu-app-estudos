@@ -5,6 +5,7 @@ import HighlightMenu from "@/components/HighlightMenu";
 import AiStatusBadge from "@/components/AiStatusBadge";
 import { requestAiAction, type AiAction } from "@/lib/aiActions";
 import { calloutColors } from "@/lib/colors";
+import { cssVarForFont, type NoteFontId } from "@/lib/fonts";
 import { useVault } from "@/lib/vaultContext";
 
 // Largura máxima confortável de leitura — o texto reflui dentro dessa coluna
@@ -25,9 +26,20 @@ function getReadingColors() {
   return { foreground, background, panelHover };
 }
 
+// cssVarForFont devolve "var(--font-lora)" — útil como valor CSS no
+// document PAI, mas variáveis CSS não atravessam pro document do iframe do
+// capítulo (mesma razão de getReadingColors acima), então aqui resolvemos
+// pro valor de verdade (a lista de fontes de fallback que next/font gerou)
+// antes de injetar no tema do rendition.
+function getReadingFontFamily(fontId: NoteFontId): string {
+  const varName = cssVarForFont(fontId).match(/--[\w-]+/)?.[0] ?? "--font-lora";
+  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || "inherit";
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyReadingTheme(rendition: any) {
+function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number) {
   const { foreground, background, panelHover } = getReadingColors();
+  const fontFamily = getReadingFontFamily(fontId);
   rendition.themes.default({
     body: {
       "max-width": `${READING_COLUMN_WIDTH}px !important`,
@@ -35,13 +47,25 @@ function applyReadingTheme(rendition: any) {
       padding: "0 1.25rem !important",
       "box-sizing": "border-box !important",
       background: `${background} !important`,
+      // Tamanho BASE, forçado só aqui (não em "*" abaixo) — headings/etc de
+      // um EPUB comum usam unidades relativas (em/rem) próprias, então esse
+      // !important garante que ESTE valor vence qualquer "body{font-size}"
+      // do próprio livro, mas a proporção dos títulos continua cascateando
+      // normalmente a partir dele (um h1{font-size:2em} do livro resolve
+      // relativo a este valor, "!important" ou não — só achataria a
+      // hierarquia se estivéssemos forçando o tamanho em "*" também, o que
+      // deliberadamente não fazemos).
+      "font-size": `${fontSize}px !important`,
     },
-    // "*" (não só "body") porque um EPUB comum define cor explícita em
-    // elementos específicos (p, span, h1...) — uma regra só em "body" perderia
-    // pra essas por herança sempre vencer nenhuma pra qualquer estilo aplicado
-    // direto no elemento, mesmo sem !important do lado do livro.
+    // "*" (não só "body") porque um EPUB comum define cor/fonte/tamanho
+    // explícito em elementos específicos (p, span, h1...) — uma regra só em
+    // "body" perderia pra essas por herança sempre vencer nenhuma pra
+    // qualquer estilo aplicado direto no elemento, mesmo sem !important do
+    // lado do livro. Só a COR e a FAMÍLIA da fonte forçadas aqui — nunca o
+    // tamanho, pra não achatar a hierarquia de títulos do livro.
     "*": {
       color: `${foreground} !important`,
+      "font-family": `${fontFamily} !important`,
     },
     // Seleção nativa do navegador — sem isso, o fundo padrão (geralmente um
     // azul claro do sistema) some contra o texto claro forçado no tema
@@ -83,6 +107,12 @@ function applyReadingTheme(rendition: any) {
 type Props = {
   filename: string;
   theme: "dark" | "light";
+  // Mesmo sistema (global + override por arquivo) já usado nas notas .md —
+  // ver fonts.ts e page.tsx (fontSizeFor/noteFontFor). Aplicado ao CONTEÚDO
+  // do livro via rendition.themes (ver applyReadingTheme), não como estilo
+  // React normal, já que o texto vive dentro do iframe de cada capítulo.
+  fontSize: number;
+  noteFont: NoteFontId;
   // Número do capítulo (1-based, pela ordem natural do spine) de destino de
   // um link "[[arquivo#cap3]]" clicado — repassado pro epub.js abrir direto
   // no início desse capítulo (ver resolveChapterHref/rendition.display abaixo).
@@ -173,6 +203,8 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   {
     filename,
     theme,
+    fontSize,
+    noteFont,
     initialChapter,
     onMarkerClick,
     sourceUrl,
@@ -362,7 +394,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // o seu) é injetado antes da nossa folha de estilo e, sem "!important",
       // um simples "body { max-width }"/cor do livro já venceria por ordem de
       // origem.
-      applyReadingTheme(rendition);
+      applyReadingTheme(rendition, noteFont, fontSize);
 
       // Fecha o menu de IA ao clicar dentro do conteúdo do EPUB sem gerar
       // uma seleção nova, ou ao apertar ESC com o foco lá dentro — cliques e
@@ -519,12 +551,13 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     if (href) renditionRef.current?.display(href);
   }, [initialChapter]);
 
-  // Reaplica as cores de leitura (sem recriar o rendition) quando o tema do
-  // app muda (claro/escuro) — getReadingColors() lê o valor atual das
-  // variáveis CSS, então só precisamos disparar a reaplicação de novo.
+  // Reaplica cores/fonte/tamanho de leitura (sem recriar o rendition) quando
+  // o tema do app muda (claro/escuro) ou a pessoa troca fonte/tamanho no
+  // menu "⋯" — getReadingColors()/getReadingFontFamily() leem o valor atual
+  // das variáveis CSS, então só precisamos disparar a reaplicação de novo.
   useEffect(() => {
-    if (renditionRef.current) applyReadingTheme(renditionRef.current);
-  }, [theme]);
+    if (renditionRef.current) applyReadingTheme(renditionRef.current, noteFont, fontSize);
+  }, [theme, noteFont, fontSize]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>

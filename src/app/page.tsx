@@ -256,14 +256,24 @@ export default function Home() {
   // Tamanho de fonte do editor: um padrão global ("fontSize") e sobrescritas
   // por nota ("fontSizeOverrides", um blob { [filename]: number }) — compartilhado
   // entre os dois painéis (a mesma nota deve ler o mesmo tamanho não importa em
-  // qual painel for aberta).
+  // qual painel for aberta). Livros do EPUB têm o PRÓPRIO padrão global
+  // ("bookFontSize", separado de "fontSize") — texto de livro pede um
+  // tamanho maior que o do editor de notas por padrão, sem afetar o padrão
+  // das notas — mas usam o MESMO blob de overrides por arquivo (já é
+  // agnóstico a tipo de conteúdo, chaveado só por filename).
   const [globalFontSize, setGlobalFontSize] = useState<number>(14);
+  const [globalBookFontSize, setGlobalBookFontSize] = useState<number>(20);
   const [noteFontSizes, setNoteFontSizes] = useState<Record<string, number>>({});
   useEffect(() => {
     const storedGlobal = localStorage.getItem("fontSize");
     if (storedGlobal) {
       const parsed = Number(storedGlobal);
       if (!Number.isNaN(parsed)) setGlobalFontSize(parsed);
+    }
+    const storedBookGlobal = localStorage.getItem("bookFontSize");
+    if (storedBookGlobal) {
+      const parsed = Number(storedBookGlobal);
+      if (!Number.isNaN(parsed)) setGlobalBookFontSize(parsed);
     }
     const storedOverrides = localStorage.getItem("fontSizeOverrides");
     if (storedOverrides) {
@@ -275,8 +285,13 @@ export default function Home() {
     }
   }, []);
 
+  function isEpubFilename(filename: string): boolean {
+    return /^calibre:\d+:EPUB$/.test(filename) || /\.epub$/i.test(filename);
+  }
+
   function fontSizeFor(filename: string | null): number {
-    return (filename && noteFontSizes[filename]) || globalFontSize;
+    if (filename && noteFontSizes[filename]) return noteFontSizes[filename];
+    return filename && isEpubFilename(filename) ? globalBookFontSize : globalFontSize;
   }
 
   function handleFontSizeChange(filename: string | null, newSize: number) {
@@ -284,6 +299,9 @@ export default function Home() {
       const next = { ...noteFontSizes, [filename]: newSize };
       setNoteFontSizes(next);
       localStorage.setItem("fontSizeOverrides", JSON.stringify(next));
+    } else if (filename && isEpubFilename(filename)) {
+      setGlobalBookFontSize(newSize);
+      localStorage.setItem("bookFontSize", String(newSize));
     } else {
       setGlobalFontSize(newSize);
       localStorage.setItem("fontSize", String(newSize));

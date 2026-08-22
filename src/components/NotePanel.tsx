@@ -2153,6 +2153,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   ref={epubViewerRef}
                   filename={filename}
                   theme={theme}
+                  fontSize={fontSize}
+                  noteFont={noteFont}
                   initialChapter={
                     activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "chapter"
                       ? parseInt(activeViewerAnchor.value, 10) || undefined
@@ -2434,6 +2436,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onFontChange={handleNoteFontChange}
           onToggleFontOverride={handleToggleNoteFontOverride}
           onClose={() => setFontSizePopupAnchor(null)}
+          itemLabel={viewerKind === "epub" ? "livro" : "nota"}
         />
       )}
 
@@ -2586,7 +2589,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                 Inserir imagem
               </button>
             )}
-            {!viewerKind && (
+            {viewerKind !== "pdf" && (
               <button
                 className="toolbar-link"
                 onClick={(e) => {
