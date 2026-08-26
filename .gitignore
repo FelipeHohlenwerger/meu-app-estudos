@@ -48,6 +48,12 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+
+# worker + wasm (jbig2/openjpeg/qcms/quickjs) do pdfjs-dist, copiados de
+# node_modules pra public/ em tempo de build (ver
+# scripts/copy-pdfjs-assets.mjs) — artefatos derivados, não fonte.
+/public/pdf.worker.min.mjs
+/public/pdfjs-wasm/
 next-env.d.ts
 
 # tauri (empacotamento desktop) — /target e /gen também já são ignorados

@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import type { VaultEntry } from "@/lib/vaultContext";
 import CreateVaultModal from "@/components/CreateVaultModal";
 import ConfirmModal from "@/components/ConfirmModal";
+import CalibreSubjectFilterModal from "@/components/CalibreSubjectFilterModal";
+import type { TagTreeNode } from "@/lib/tagTree";
 import { isTauri } from "@/lib/platform";
 
 type Props = {
@@ -13,6 +15,10 @@ type Props = {
   onRename: (id: string, name: string) => Promise<void>;
   onCreated: (vault: VaultEntry) => void;
   onDelete: (id: string) => Promise<void>;
+  // Árvore global de Assuntos do Calibre (catálogo inteiro, sem filtro de
+  // vault) — alimenta a modal de seleção por vault abaixo.
+  calibreSubjectTree: TagTreeNode[];
+  onCalibreSubjectFilterSaved: (vaultId: string, subjectPaths: string[]) => void;
 };
 
 function ChevronIcon() {
@@ -39,13 +45,33 @@ function TrashIcon() {
   );
 }
 
-export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRename, onCreated, onDelete }: Props) {
+function FilterIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5h16l-6.5 8v5l-3 2v-7Z" />
+    </svg>
+  );
+}
+
+export default function VaultSwitcher({
+  vaults,
+  activeVaultId,
+  onSwitch,
+  onRename,
+  onCreated,
+  onDelete,
+  calibreSubjectTree,
+  onCalibreSubjectFilterSaved,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // Qual vault está com a modal de Assuntos do Calibre aberta — não faz
+  // parte do fluxo de criação (requisito explícito), fica só aqui na lista.
+  const [subjectFilterVaultId, setSubjectFilterVaultId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -327,6 +353,25 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
                   <PencilIcon />
                 </button>
               )}
+              {renamingId !== vault.id && calibrePath !== null && (
+                <button
+                  onClick={() => setSubjectFilterVaultId(vault.id)}
+                  title="Configurar Assuntos do Calibre visíveis nesta vault"
+                  className="toolbar-link"
+                  style={{
+                    padding: "0.35rem",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    color: "var(--text-muted)",
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                >
+                  <FilterIcon />
+                </button>
+              )}
               {renamingId !== vault.id && (
                 <button
                   onClick={() => setConfirmDeleteId(vault.id)}
@@ -491,6 +536,16 @@ export default function VaultSwitcher({ vaults, activeVaultId, onSwitch, onRenam
           danger
           onConfirm={handleConfirmDelete}
           onCancel={() => setConfirmDeleteId(null)}
+        />
+      )}
+
+      {subjectFilterVaultId && (
+        <CalibreSubjectFilterModal
+          vaultId={subjectFilterVaultId}
+          vaultName={vaults.find((v) => v.id === subjectFilterVaultId)?.name ?? ""}
+          tree={calibreSubjectTree}
+          onClose={() => setSubjectFilterVaultId(null)}
+          onSaved={onCalibreSubjectFilterSaved}
         />
       )}
     </div>

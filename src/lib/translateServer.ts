@@ -1,9 +1,14 @@
-// Chamada server-side pro endpoint gratuito e sem chave do Google Tradutor
-// (o mesmo que bibliotecas como `googletrans` usam) — não é oficialmente
-// documentado/suportado pelo Google, mas amplamente usado e estável na
-// prática. Escolhido depois de duas alternativas descartadas: Cloud
-// Translation API oficial (exige cartão/depósito mesmo no tier gratuito) e
-// LibreTranslate self-hosted (dependeria de um serviço extra sempre ligado).
+// Chamada server-side pro MTranServer (github.com/xxnuo/mtranserver) — servidor
+// de tradução offline self-hosted, rodando via Docker num computador da rede
+// local (ver CLAUDE.md pro histórico completo da migração). Substitui o
+// endpoint gratuito e não-oficial do Google Tradutor (translate.googleapis.com/
+// translate_a/single), abandonado depois de ficar bloqueado por rate limit por
+// vários dias seguidos, sem melhora nem depois de trocar o IP público — um
+// endpoint de terceiro sem SLA nenhum não é viável como dependência
+// permanente. Nunca hospeda o container aqui: `MTRANSERVER_URL` aponta pro
+// endereço de rede de onde o container está rodando (ver .env.example) —
+// tradução fica indisponível sempre que essa máquina estiver desligada ou
+// fora da rede, e isso precisa aparecer como erro claro, não falha silenciosa.
 
 export class TranslateError extends Error {
   status: number;
@@ -13,71 +18,56 @@ export class TranslateError extends Error {
   }
 }
 
-// Intervalo mínimo entre chamadas reais ao endpoint — estado de módulo
-// (sobrevive entre requests, dentro do mesmo processo do servidor), então
-// serializa rajadas mesmo vindas de sessões/abas diferentes, em vez de cada
-// request disparar seu próprio fetch imediatamente. Investigado (ver rodada
-// anterior): o debounce por seleção já garante 1 chamada por ação da
-// pessoa — isso aqui é uma segunda camada de proteção, independente disso,
-// contra qualquer rajada não prevista.
-const MIN_INTERVAL_MS = 500;
-let lastCallAt = 0;
-
-async function throttledFetch(url: string): Promise<Response> {
-  const wait = MIN_INTERVAL_MS - (Date.now() - lastCallAt);
-  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-  lastCallAt = Date.now();
-  return fetch(url);
-}
-
 export async function callTranslate(
   texto: string
 ): Promise<{ translatedText: string; detectedSourceLanguage?: string }> {
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=pt&dt=t&q=${encodeURIComponent(texto)}`;
-
-  async function attempt(): Promise<Response> {
-    try {
-      return await throttledFetch(url);
-    } catch {
-      // Mesmo padrão já usado pro erro de "servidor Calibre inalcançável"
-      // (page.tsx) — distingue falha de rede (sem resposta nenhuma) de erro
-      // HTTP (resposta chegou, mas com erro).
-      throw new TranslateError("Não foi possível conectar ao serviço de tradução — verifique sua conexão com a internet.", 503);
-    }
-  }
-
-  let res = await attempt();
-
-  // O endpoint não-oficial costuma bloquear (429) em rajadas curtas que
-  // passam sozinhas em pouco tempo — uma única nova tentativa depois de 1s
-  // resolve a maioria dos casos sem a pessoa perceber que algo falhou.
-  if (res.status === 429) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    res = await attempt();
-  }
-
-  if (!res.ok) {
+  const baseUrl = process.env.MTRANSERVER_URL;
+  if (!baseUrl) {
     throw new TranslateError(
-      res.status === 429
-        ? "Serviço de tradução temporariamente indisponível (limite de uso do endpoint gratuito atingido) — tente de novo em alguns minutos."
-        : `Erro ao chamar o serviço de tradução (HTTP ${res.status})`,
-      res.status
+      "MTRANSERVER_URL não configurada — crie .env.local com essa variável (ver .env.example).",
+      500
+    );
+  }
+  const apiToken = process.env.MTRANSERVER_API_TOKEN;
+
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl.replace(/\/$/, "")}/translate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
+      },
+      // "from: auto" — MTranServer detecta o idioma de origem sozinho (par
+      // inglês/português configurado no servidor); "to: pt" sempre fixo,
+      // igual ao endpoint antigo, porque o app sempre traduz PRA português,
+      // não o contrário.
+      body: JSON.stringify({ from: "auto", to: "pt", text: texto, html: false }),
+    });
+  } catch {
+    // Mesmo padrão de mensagem já usado pro "servidor Calibre inalcançável"
+    // (page.tsx) — aqui a causa mais provável é o notebook desligado ou fora
+    // da rede local, não a internet da pessoa (o serviço é local).
+    throw new TranslateError(
+      "Não foi possível conectar ao serviço de tradução — verifique se o notebook está ligado e acessível na rede local.",
+      503
     );
   }
 
-  const data = await res.json().catch(() => null);
-  const segments = data?.[0];
-  if (!Array.isArray(segments)) {
-    throw new TranslateError("O serviço de tradução não retornou nenhum resultado", 502);
+  if (!res.ok) {
+    throw new TranslateError(`Erro ao chamar o serviço de tradução (HTTP ${res.status})`, res.status);
   }
 
-  // Textos longos vêm quebrados em várias sentenças — concatena todas.
-  const translatedText = segments.map((seg: unknown) => (Array.isArray(seg) ? String(seg[0] ?? "") : "")).join("");
-  const detectedSourceLanguage = typeof data?.[2] === "string" ? data[2] : undefined;
-
+  const data = await res.json().catch(() => null);
+  const translatedText = typeof data?.result === "string" ? data.result : undefined;
   if (!translatedText) {
     throw new TranslateError("O serviço de tradução não retornou nenhum resultado", 502);
   }
+
+  // Alguns idiomas de origem valem a pena mostrar na UI ("Traduzido do
+  // inglês") — só quando o servidor realmente resolveu um idioma concreto,
+  // nunca o literal "auto" de volta.
+  const detectedSourceLanguage = typeof data?.from === "string" && data.from !== "auto" ? data.from : undefined;
 
   return { translatedText, detectedSourceLanguage };
 }

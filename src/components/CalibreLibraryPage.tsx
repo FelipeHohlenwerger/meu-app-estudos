@@ -235,13 +235,15 @@ type Props = {
   error: string | null;
   onBack: () => void;
   onOpenBook: (book: CalibreBook) => void;
+  favoriteIds: Set<number>;
+  onToggleFavorite: (calibreId: number) => void;
 };
 
 // Página cheia da biblioteca Calibre — grade de capas reais com 3 filtros
 // combináveis (Assunto/Série/Autor, E lógico entre eles), diferente do modo
 // EXCLUSIVO da aba "Calibre" da sidebar (ver page.tsx). Sem filtro de
 // Editora (já disponível direto no Calibre, não precisa ser duplicado aqui).
-export default function CalibreLibraryPage({ books, error, onBack, onOpenBook }: Props) {
+export default function CalibreLibraryPage({ books, error, onBack, onOpenBook, favoriteIds, onToggleFavorite }: Props) {
   const [subjectFilters, setSubjectFilters] = useState<string[]>([]);
   const [seriesFilters, setSeriesFilters] = useState<string[]>([]);
   const [authorFilters, setAuthorFilters] = useState<string[]>([]);
@@ -312,7 +314,13 @@ export default function CalibreLibraryPage({ books, error, onBack, onOpenBook }:
 
       <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, ${CARD_WIDTH}px)`, gap: "1rem", marginTop: "2rem" }}>
         {filtered.map((book) => (
-          <CalibreBookCard key={book.id} book={book} onClick={() => onOpenBook(book)} />
+          <CalibreBookCard
+            key={book.id}
+            book={book}
+            onClick={() => onOpenBook(book)}
+            isFavorite={favoriteIds.has(book.id)}
+            onToggleFavorite={() => onToggleFavorite(book.id)}
+          />
         ))}
       </div>
 

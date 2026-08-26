@@ -48,6 +48,20 @@ export function normalizeTagKey(tag: string): string {
   return tag.trim().toLowerCase();
 }
 
+// Verdadeiro se `candidatePath` É `ancestorOrSelfPath` OU está em qualquer
+// profundidade abaixo dele (comparação normalizada, ver normalizeTagKey
+// acima). Idioma de "tag === path || tag.startsWith(path + '.')" já usado
+// em getCalibreBooksForTagPath (vaultIndex.ts); extraído aqui por ser
+// puramente sobre strings de caminho hierárquico com ponto — reaproveitado
+// tanto no filtro de Assuntos do Calibre por vault (page.tsx) quanto no
+// cálculo de estado da árvore de checkboxes que o configura
+// (CalibreSubjectFilterModal.tsx).
+export function isPathWithin(candidatePath: string, ancestorOrSelfPath: string): boolean {
+  const c = normalizeTagKey(candidatePath);
+  const a = normalizeTagKey(ancestorOrSelfPath);
+  return c === a || c.startsWith(a + ".");
+}
+
 // `tagCounts`: mesmo formato de getTagCounts()/GET /api/tags — [tag, contagem
 // de notas com essa tag exata]. Sem profundidade máxima: aceita quantos "."
 // existirem no texto da tag. Nós são agrupados por segmento NORMALIZADO (ver

@@ -1,6 +1,7 @@
 "use client";
 
 import type { CalibreBook } from "@/lib/calibreLibrary";
+import { StarIcon, overlayButtonStyle } from "@/components/NoteCard";
 
 function BookIcon() {
   return (
@@ -11,15 +12,25 @@ function BookIcon() {
   );
 }
 
-type Props = { book: CalibreBook; onClick: () => void };
+type Props = {
+  book: CalibreBook;
+  onClick: () => void;
+  // Opcionais — nem todo caller quer/precisa da estrela (mantém o card
+  // usável em contextos que só listam livros sem favoritar). Quando
+  // presentes, mesmo botão circular semi-transparente do NoteCard.tsx
+  // (StarIcon/overlayButtonStyle), sem "..." de renomear/excluir/preview de
+  // texto — isso continua sem existir pra um livro do Calibre.
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
+};
 
 // Card de livro do Calibre — mesmo desenho de faixa 16:10 do NoteCard
-// redesenhado, mas sem estrela/menu/preview de texto (nada disso existe pra
-// um livro do Calibre: sem favorito próprio, sem "..." de renomear/excluir,
-// sem resumo de corpo) — campos disponíveis (capa/título/autor) são bem
-// diferentes de LibraryNote, por isso um componente dedicado em vez de
-// forçar o mesmo NoteCard a aceitar as duas formas.
-export default function CalibreBookCard({ book, onClick }: Props) {
+// redesenhado, mas sem menu/preview de texto (nada disso existe pra um livro
+// do Calibre: sem "..." de renomear/excluir, sem resumo de corpo) — campos
+// disponíveis (capa/título/autor) são bem diferentes de LibraryNote, por
+// isso um componente dedicado em vez de forçar o mesmo NoteCard a aceitar as
+// duas formas.
+export default function CalibreBookCard({ book, onClick, isFavorite, onToggleFavorite }: Props) {
   const coverUrl = book.hasCover ? `/api/calibre/cover/${book.id}` : null;
   return (
     <div
@@ -65,6 +76,20 @@ export default function CalibreBookCard({ book, onClick }: Props) {
           <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <BookIcon />
           </div>
+        )}
+
+        {onToggleFavorite && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFavorite();
+            }}
+            className="toolbar-link"
+            title={isFavorite ? "Remover dos favoritos" : "Marcar como favorito"}
+            style={{ position: "absolute", top: "0.4rem", right: "0.4rem", ...overlayButtonStyle }}
+          >
+            <StarIcon filled={!!isFavorite} />
+          </button>
         )}
       </div>
       {/* Corpo com altura reservada por construção (mesmo princípio do

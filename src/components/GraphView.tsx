@@ -17,7 +17,14 @@ import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import { drag } from "d3-drag";
 import { select } from "d3-selection";
 import "d3-transition"; // side-effect: adiciona selection.transition(), usado no botão de reset de zoom
-import { GRAPH_SPACE_BACKGROUND, GRAPH_TAG_NODE_COLOR, GRAPH_CALIBRE_NODE_COLOR, GRAPH_CALIBRE_GLOW_COLOR } from "@/lib/colors";
+import {
+  GRAPH_SPACE_BACKGROUND,
+  GRAPH_TAG_NODE_COLOR,
+  GRAPH_CALIBRE_NODE_COLOR,
+  GRAPH_CALIBRE_GLOW_COLOR,
+  GRAPH_GHOST_NODE_COLOR,
+  GRAPH_GHOST_GLOW_COLOR,
+} from "@/lib/colors";
 import { LayersIcon } from "@/components/SubtemaCard";
 
 // `filename` dobra como "id" genérico do nó — pra um nó kind:"tag" (Modo Mapa
@@ -31,10 +38,20 @@ import { LayersIcon } from "@/components/SubtemaCard";
 // getLocalGraph/getGlobalGraph, vaultIndex.ts — nunca existe na tabela
 // `notes`) — mesmo círculo/glow pulsante de "note", só em dourado
 // (GRAPH_CALIBRE_NODE_COLOR/GLOW), com um ícone de livro dentro.
-export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "tag" | "calibre" };
+// "ghost" = "nota fantasma": alvo de um "[[Título]]" que não resolve pra
+// nenhuma nota nem livro do Calibre (nó sintético gerado em
+// addGhostConnections, vaultIndex.ts, `filename` = pseudo-id "ghost:<título
+// minúsculo>", `title` = texto original do link) — MESMA forma/contorno do
+// nó "note" (não é um branch visual à parte, ver isGhostNode abaixo), só com
+// opacidade reduzida; clicar cria a nota (ver onSelectNode em page.tsx).
+export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "tag" | "calibre" | "ghost" };
 // `kind` ausente = `"wikilink"` (único tipo que existia antes desta adição) —
 // mesma lógica de compatibilidade aditiva do `GraphNode.kind` acima.
-export type GraphEdge = { source: string; target: string; kind?: "hierarchy" | "wikilink" };
+// "broken" = aresta até um nó "ghost" — tracejada, mesmo espírito do
+// "wikilink" tracejado, mas sem cor própria (seria mais um aviso vermelho, o
+// que o pedido original explicitamente queria evitar) — reaproveita
+// EDGE_COLOR, só tracejada e mais translúcida.
+export type GraphEdge = { source: string; target: string; kind?: "hierarchy" | "wikilink" | "broken" };
 
 type Props = {
   nodes: GraphNode[];
@@ -49,7 +66,8 @@ type Props = {
   // Generalizado de onSelectNote(filename) — page.tsx trata "calibre" igual a
   // "note" (mesma pseudo-filename "calibre:<id>:<FORMAT>" que um clique em
   // "[[Título do Livro]]" já produz, ver NotePanel.tsx), só ignora "tag".
-  onSelectNode: (id: string, kind: "note" | "tag" | "calibre") => void;
+  // "ghost" precisa de tratamento à parte (criar a nota antes de poder abrir).
+  onSelectNode: (id: string, kind: "note" | "tag" | "calibre" | "ghost") => void;
   // Opcionais — o Modo Mapa de TagFocusPage.tsx não tem um botão de tela
   // cheia próprio (pedido não incluiu isso); Graph View global continua
   // passando os dois sempre, comportamento idêntico a antes desta adição.
@@ -77,6 +95,11 @@ const NODE_COLOR = "#ffffff";
 const GLOW_COLOR = "#aab4ff";
 const HIGHLIGHT_RING_COLOR = "#2f7fd6";
 const MIN_NODE_OPACITY = 0.35;
+// Opacidade fixa de um nó "ghost" — sempre abaixo de MIN_NODE_OPACITY, pra
+// ficar mais translúcido que até a nota real mais isolada do grafo (o "grau
+// de conexão" de um nó fantasma não tem o mesmo significado de uma nota de
+// verdade, então não usa opacityForDegree).
+const GHOST_NODE_OPACITY = 0.3;
 
 // Hash simples e determinístico (mesmo filename sempre cai no mesmo valor,
 // entre re-renders) — usado só pra variar duração/atraso do "brilho pulsante"
@@ -462,6 +485,10 @@ export default function GraphView({
             <stop offset="0%" stopColor={GRAPH_CALIBRE_GLOW_COLOR} />
             <stop offset="100%" stopColor={GRAPH_CALIBRE_NODE_COLOR} />
           </radialGradient>
+          <radialGradient id="graph-ghost-core" cx="35%" cy="35%" r="65%">
+            <stop offset="0%" stopColor={GRAPH_GHOST_GLOW_COLOR} />
+            <stop offset="100%" stopColor={GRAPH_GHOST_NODE_COLOR} />
+          </radialGradient>
         </defs>
 
         <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.k})`}>
@@ -476,7 +503,11 @@ export default function GraphView({
             // ("wikilink" — link [[nota]] cruzando ramos, só informativo,
             // nunca clicável, sem onClick em nenhuma das duas variantes) ou
             // continuar sólida cinza ("hierarchy" — tema→subtema→nota).
+            // "broken" (aresta até um nó "ghost") também fica tracejada, mas
+            // sem cor própria (mesma EDGE_COLOR cinza) e mais translúcida —
+            // reforça "conexão até algo que ainda não existe" sem soar aviso.
             const isExplicitWikilink = edge.kind === "wikilink";
+            const isBrokenEdge = edge.kind === "broken";
             return (
               <line
                 key={i}
@@ -486,9 +517,9 @@ export default function GraphView({
                 y2={to.y}
                 stroke={isExplicitWikilink ? "var(--link-color)" : EDGE_COLOR}
                 strokeWidth={1}
-                strokeDasharray={isExplicitWikilink ? "4 3" : undefined}
+                strokeDasharray={isExplicitWikilink ? "4 3" : isBrokenEdge ? "3 3" : undefined}
                 strokeLinecap="round"
-                opacity={0.4}
+                opacity={isBrokenEdge ? 0.25 : 0.4}
                 style={{
                   // Só faz sentido "animar" a posição no layout radial (muda de
                   // forma discreta e rara) — no layout de força a simulação já
@@ -509,7 +540,12 @@ export default function GraphView({
             const isCenter = scope === "local" && node.filename === centerFilename;
             const isActive = node.filename === activeNoteFilename;
             const isDragging = draggingFilename === node.filename;
-            const opacity = isActive ? 1 : opacityForDegree(degrees.get(node.filename) ?? 0, minDegree, maxDegree);
+            const isGhostNode = node.kind === "ghost";
+            const opacity = isGhostNode
+              ? GHOST_NODE_OPACITY
+              : isActive
+              ? 1
+              : opacityForDegree(degrees.get(node.filename) ?? 0, minDegree, maxDegree);
             const radius = isCenter || isActive ? 16 : 11;
             const seed = hashString(node.filename);
             const pulseDuration = 2.6 + (seed % 22) / 10; // 2.6s a 4.8s
@@ -571,6 +607,31 @@ export default function GraphView({
                     <g transform={`translate(${-iconSize / 2}, ${-iconSize / 2})`} style={{ color: GRAPH_SPACE_BACKGROUND }}>
                       <BookIcon size={iconSize} />
                     </g>
+                  </>
+                ) : isGhostNode ? (
+                  // Mesma forma/contorno e MESMO glow pulsante do nó "note"
+                  // (pedido original: um nó fantasma não muda de formato) —
+                  // só a cor muda pro cinza dessaturado de GRAPH_GHOST_*
+                  // (não o branco/azulado de "note"), reforçando "presença
+                  // apagada" mesmo antes de reparar na opacidade reduzida do
+                  // <g> pai (GHOST_NODE_OPACITY, calculada acima).
+                  <>
+                    <circle
+                      className="graph-node-glow"
+                      r={radius * 2.2}
+                      fill={GRAPH_GHOST_GLOW_COLOR}
+                      filter="url(#graph-star-glow)"
+                      style={{
+                        animationDuration: `${pulseDuration}s`,
+                        animationDelay: `${pulseDelay}s`,
+                      }}
+                    />
+                    <circle
+                      r={radius}
+                      fill="url(#graph-ghost-core)"
+                      stroke={isActive ? HIGHLIGHT_RING_COLOR : "none"}
+                      strokeWidth={2}
+                    />
                   </>
                 ) : (
                   <>

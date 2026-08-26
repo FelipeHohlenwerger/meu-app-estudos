@@ -276,14 +276,16 @@ function wikiLinkMarkFor(filename: string) {
   });
 }
 
-// Link quebrado: não corresponde a nenhuma nota (nem por título/alias) — cor de
-// aviso; clicar oferece criar a nota (ver wikiLinkClickHandler em page.tsx).
+// Link quebrado: não corresponde a nenhuma nota (nem por título/alias) — "nota
+// fantasma", discreta (cor fraca, sem sublinhado) em vez de aviso chamativo;
+// clicar oferece criar a nota (ver wikiLinkClickHandler em page.tsx).
 function brokenWikiLinkMarkFor(rawTarget: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: #d04444; cursor: pointer; text-decoration: underline wavy;",
+      style: "color: var(--text-muted); cursor: pointer; text-decoration: none;",
       class: "wiki-link-broken",
       "data-target-title": rawTarget,
+      title: "Nota ainda não existe — clique para criar",
     },
   });
 }
@@ -306,9 +308,10 @@ function wikiPageLinkMarkFor(filename: string, pageRaw: string) {
 function brokenWikiPageLinkMarkFor(rawTarget: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: #d04444; cursor: pointer; text-decoration: underline wavy;",
+      style: "color: var(--text-muted); cursor: pointer; text-decoration: none;",
       class: "wiki-page-link-broken",
       "data-target-title": rawTarget,
+      title: "Nota ainda não existe — clique para criar",
     },
   });
 }
@@ -332,9 +335,10 @@ function wikiChapterLinkMarkFor(filename: string, chapterRaw: string) {
 function brokenWikiChapterLinkMarkFor(rawTarget: string) {
   return Decoration.mark({
     attributes: {
-      style: "color: #d04444; cursor: pointer; text-decoration: underline wavy;",
+      style: "color: var(--text-muted); cursor: pointer; text-decoration: none;",
       class: "wiki-chapter-link-broken",
       "data-target-title": rawTarget,
+      title: "Nota ainda não existe — clique para criar",
     },
   });
 }
@@ -386,12 +390,13 @@ function blockLinkMarkFor(filename: string, blockId: string) {
 function brokenBlockLinkMarkFor(noteRaw: string, blockId: string, noteExists: boolean, noteFilename: string | null) {
   return Decoration.mark({
     attributes: {
-      style: "color: #d04444; cursor: pointer; text-decoration: underline wavy;",
+      style: "color: var(--text-muted); cursor: pointer; text-decoration: none;",
       class: "wiki-block-link-broken",
       "data-target-title": noteRaw,
       "data-target-filename": noteFilename ?? "",
       "data-target-block": blockId,
       "data-note-exists": noteExists ? "1" : "0",
+      title: noteExists ? "Bloco não encontrado nesta nota — clique para abrir a nota" : "Nota ainda não existe — clique para criar",
     },
   });
 }

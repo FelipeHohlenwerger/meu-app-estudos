@@ -8,6 +8,7 @@ import { IMAGE_REGEX } from "@/lib/imageSyntax";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { calibrePseudoFilename } from "@/lib/calibreLink";
 import { getLinkedBooksForNotes, getLinkedNotes } from "@/lib/calibreAnnotations";
+import { normalizeTagKey } from "@/lib/tagTree";
 
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
@@ -369,6 +370,32 @@ function getDb(vaultId: string): DatabaseSync {
     CREATE TABLE IF NOT EXISTS tag_covers (
       tag_path TEXT PRIMARY KEY,
       cover_path TEXT NOT NULL
+    );
+
+    -- Filtro de Assuntos do Calibre por vault (ver VaultSwitcher.tsx →
+    -- CalibreSubjectFilterModal.tsx): conjunto CANÔNICO de subject paths
+    -- (mesmo formato hierárquico normalizado de normalizeTagKey, tagTree.ts)
+    -- que esta vault deixa visível na aba "Calibre" da sidebar, na galeria
+    -- cheia e na prévia da Homepage. Cada linha significa "este assunto E
+    -- TODOS os descendentes, inclusive futuros" — não uma lista fixa de
+    -- folhas, pra sobreviver a livros novos catalogados depois sob um
+    -- assunto já selecionado sem precisar reconfigurar. Tabela vazia
+    -- (padrão) = biblioteca inteira visível, sem filtro nenhum (opt-in).
+    CREATE TABLE IF NOT EXISTS calibre_subject_filter (
+      subject_path TEXT PRIMARY KEY
+    );
+
+    -- Posição de leitura salva automaticamente por arquivo (PDF: última
+    -- página digitada no cabeçalho — o iframe nativo não deixa ler a página
+    -- de volta enquanto rola; EPUB: CFI da última posição "relocated" de
+    -- verdade) — SEMPRE sobrescrita, nunca histórico. Nunca page/cfi
+    -- preenchidos juntos pro mesmo filename (a extensão decide qual). Sem FK
+    -- pra notes, mesmo espírito órfão-tolerante de tag_covers.
+    CREATE TABLE IF NOT EXISTS reading_positions (
+      filename TEXT PRIMARY KEY,
+      page INTEGER,
+      cfi TEXT,
+      updated_at INTEGER NOT NULL
     );
   `);
 
@@ -738,6 +765,54 @@ export function setTagCover(vaultId: string, tagPath: string, coverPath: string 
     .run(tagPath, coverPath);
 }
 
+// Seleção de Assuntos do Calibre visíveis nesta vault — ver comentário da
+// tabela calibre_subject_filter acima. [] = sem filtro configurado.
+export function getCalibreSubjectFilter(vaultId: string): string[] {
+  const conn = getDb(vaultId);
+  const rows = conn.prepare("SELECT subject_path FROM calibre_subject_filter").all() as { subject_path: string }[];
+  return rows.map((r) => r.subject_path);
+}
+
+// Substituição em bloco (não upsert de uma chave por vez, ao contrário de
+// setTagCover) — a modal de configuração deixa a pessoa montar a seleção
+// inteira antes de clicar "Salvar" uma única vez, então cada save é a
+// versão final completa do conjunto, não um incremento.
+export function setCalibreSubjectFilter(vaultId: string, subjectPaths: string[]): void {
+  const conn = getDb(vaultId);
+  conn.exec("BEGIN");
+  try {
+    conn.prepare("DELETE FROM calibre_subject_filter").run();
+    const insert = conn.prepare("INSERT INTO calibre_subject_filter (subject_path) VALUES (?)");
+    for (const path of subjectPaths) insert.run(path);
+    conn.exec("COMMIT");
+  } catch (err) {
+    conn.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export type ReadingPosition = { page: number | null; cfi: string | null };
+
+export function getReadingPosition(vaultId: string, filename: string): ReadingPosition | null {
+  const conn = getDb(vaultId);
+  const row = conn
+    .prepare("SELECT page, cfi FROM reading_positions WHERE filename = ? COLLATE NOCASE")
+    .get(filename) as { page: number | null; cfi: string | null } | undefined;
+  return row ?? null;
+}
+
+// `data` só traz UM dos dois campos por chamada (page pra PDF, cfi pra
+// EPUB) — upsert simples, sempre sobrescreve (nunca histórico).
+export function setReadingPosition(vaultId: string, filename: string, data: { page?: number; cfi?: string }): void {
+  const conn = getDb(vaultId);
+  conn
+    .prepare(
+      `INSERT INTO reading_positions (filename, page, cfi, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(filename) DO UPDATE SET page = excluded.page, cfi = excluded.cfi, updated_at = excluded.updated_at`
+    )
+    .run(filename, data.page ?? null, data.cfi ?? null, Date.now());
+}
+
 export function getTagsByNote(vaultId: string): Record<string, string[]> {
   const conn = getDb(vaultId);
   const notesRows = conn.prepare("SELECT id, filename FROM notes").all() as { id: number; filename: string }[];
@@ -1044,9 +1119,14 @@ export function resolveBlockRefs(vaultId: string, refs: { noteRaw: string; block
 
 // `kind` ausente = nota comum (compatível com o formato de antes desta
 // adição) — "calibre" só aparece nos nós sintéticos gerados por
-// addCalibreConnections abaixo, nunca vem de `notes`.
-export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "calibre" };
-export type GraphEdge = { source: string; target: string };
+// addCalibreConnections abaixo, nunca vem de `notes`; "ghost" só aparece nos
+// nós sintéticos gerados por addGhostConnections abaixo (link [[Título]] que
+// não resolve pra nota nem livro do Calibre).
+export type GraphNode = { filename: string; title: string; tag: string | null; kind?: "note" | "calibre" | "ghost" };
+// `kind` ausente = aresta normal (compatível com o formato de antes desta
+// adição) — "broken" só aparece nas arestas geradas por addGhostConnections,
+// pro GraphView.tsx renderizar tracejado (ver GraphEdge em GraphView.tsx).
+export type GraphEdge = { source: string; target: string; kind?: "broken" };
 
 // Metadado de nó pro grafo: filename/título/tag principal (primeira tag
 // adicionada à nota pelo campo dedicado — os ids da tabela `tags` preservam
@@ -1152,6 +1232,112 @@ function addCalibreConnections(
   }
 }
 
+// Passo aditivo pro grafo (mesmo padrão de addCalibreConnections acima,
+// mesma assinatura/uso de addedNode/seenEdge): acrescenta nós "fantasma" —
+// alvo de um "[[Título]]" que não resolve pra nenhuma nota E não é um livro
+// do Calibre (esse caso já sai coberto por addCalibreConnections, chamada
+// antes desta). Vários links pro mesmo título viram UM nó fantasma só
+// (chave normalizada por título minúsculo, mesmo raciocínio de
+// calibrePseudoFilename), não um nó por link/nota de origem.
+function addGhostConnections(
+  conn: DatabaseSync,
+  noteIds: number[],
+  filenameById: Map<number, string>,
+  calibreBooks: CalibreBook[],
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  addedNode: Set<string>,
+  seenEdge: Set<string>
+): void {
+  if (noteIds.length === 0) return;
+  const calibreTitles = new Set(calibreBooks.map((b) => b.title.toLowerCase()));
+
+  for (const row of getUnresolvedLinkRows(conn, noteIds)) {
+    const titleLower = row.target_raw.toLowerCase();
+    if (calibreTitles.has(titleLower)) continue; // já tratado por addCalibreConnections
+    const source = filenameById.get(row.source_note_id);
+    if (!source) continue;
+    const target = `ghost:${titleLower}`;
+    if (!addedNode.has(target)) {
+      addedNode.add(target);
+      nodes.push({ filename: target, title: row.target_raw, tag: null, kind: "ghost" });
+    }
+    const edgeKey = [source, target].sort().join("|");
+    if (seenEdge.has(edgeKey)) continue;
+    seenEdge.add(edgeKey);
+    edges.push({ source, target, kind: "broken" });
+  }
+}
+
+// {id, filename, tags[]} de toda nota — diferente de getTagsByNote
+// (filename-keyed, usado em outro lugar) e de getGraphNodeMeta (só a tag
+// "principal", pra colorir nó do grafo); aqui precisamos do id (pra
+// getUnresolvedLinkRows) E de todas as tags (pra bater hierarquia contra um
+// tagPath, ver getCalibreBooksForTagPath abaixo).
+function getNotesWithTags(conn: DatabaseSync): { id: number; filename: string; tags: string[] }[] {
+  const notesRows = conn.prepare("SELECT id, filename FROM notes").all() as { id: number; filename: string }[];
+  const tagsRows = conn.prepare("SELECT note_id, tag FROM tags").all() as { note_id: number; tag: string }[];
+  const tagsByNoteId = new Map<number, string[]>();
+  for (const row of tagsRows) {
+    const list = tagsByNoteId.get(row.note_id) ?? [];
+    list.push(row.tag);
+    tagsByNoteId.set(row.note_id, list);
+  }
+  return notesRows.map((n) => ({ id: n.id, filename: n.filename, tags: tagsByNoteId.get(n.id) ?? [] }));
+}
+
+// Livros do Calibre relacionados INDIRETAMENTE a um tema (tagPath + qualquer
+// subtema, em qualquer profundidade) — um livro do Calibre não tem tag
+// própria no app (só o campo "Assunto" nativo do Calibre, outra coisa), então
+// "pertencer" a um tema só existe através de uma nota que o cita ([[Título]])
+// OU vincula (botão "Vincular") E tem aquele tema. Mesma união de duas fontes
+// de addCalibreConnections acima (getUnresolvedLinkRows + getLinkedBooksForNotes),
+// só que devolvendo os livros em vez de construir nós/arestas de grafo — um
+// livro pode aparecer em vários temas ao mesmo tempo, isso é esperado, não é
+// deduplicado ENTRE chamadas (só dentro desta mesma chamada, por id).
+export function getCalibreBooksForTagPath(vaultId: string, tagPath: string, calibreBooks: CalibreBook[]): CalibreBook[] {
+  if (calibreBooks.length === 0) return [];
+  const conn = getDb(vaultId);
+  const normalizedPath = normalizeTagKey(tagPath);
+  const prefix = `${normalizedPath}.`;
+
+  const allNotes = getNotesWithTags(conn);
+  const matchingNotes = allNotes.filter((n) =>
+    n.tags.some((t) => {
+      const nt = normalizeTagKey(t);
+      return nt === normalizedPath || nt.startsWith(prefix);
+    })
+  );
+  if (matchingNotes.length === 0) return [];
+
+  const matchingNoteIds = matchingNotes.map((n) => n.id);
+  const matchingFilenames = matchingNotes.map((n) => n.filename);
+
+  const byTitle = new Map(calibreBooks.map((b) => [b.title.toLowerCase(), b]));
+  const byId = new Map(calibreBooks.map((b) => [b.id, b]));
+  const found = new Set<number>();
+  const result: CalibreBook[] = [];
+  function addBook(book: CalibreBook) {
+    if (found.has(book.id)) return;
+    found.add(book.id);
+    result.push(book);
+  }
+
+  for (const row of getUnresolvedLinkRows(conn, matchingNoteIds)) {
+    const book = byTitle.get(row.target_raw.toLowerCase());
+    if (book) addBook(book);
+  }
+
+  for (const bookIds of getLinkedBooksForNotes(vaultId, matchingFilenames).values()) {
+    for (const bookId of bookIds) {
+      const book = byId.get(bookId);
+      if (book) addBook(book);
+    }
+  }
+
+  return result;
+}
+
 // Grafo do vault inteiro: todas as notas (mesmo sem tag/link) + todos os links resolvidos.
 // `calibreBooks` é opcional (buscar a biblioteca é assíncrono — quem chama já
 // tem esse resultado em mãos, ex. src/app/api/graph/route.ts) — omitido, o
@@ -1176,6 +1362,7 @@ export function getGlobalGraph(vaultId: string, calibreBooks: CalibreBook[] = []
 
   const addedNode = new Set(nodes.map((n) => n.filename));
   addCalibreConnections(conn, vaultId, nodeMeta.map((n) => n.id), byId, calibreBooks, nodes, edges, addedNode, new Set());
+  addGhostConnections(conn, nodeMeta.map((n) => n.id), byId, calibreBooks, nodes, edges, addedNode, new Set());
 
   return { nodes, edges };
 }
@@ -1297,6 +1484,9 @@ export function getLocalGraph(
   // com o próprio livro central (se aplicável), pra não duplicar a aresta
   // livro↔nota já adicionada.
   addCalibreConnections(conn, vaultId, Array.from(visited), filenameById, calibreBooks, nodes, edges, addedNode, calibreEdgeSeen);
+  // Mesmo raciocínio de leaf do comentário acima, agora pros nós "ghost"
+  // (link [[Título]] que não resolve pra nota nem livro do Calibre).
+  addGhostConnections(conn, Array.from(visited), filenameById, calibreBooks, nodes, edges, addedNode, new Set());
 
   return { nodes, edges };
 }

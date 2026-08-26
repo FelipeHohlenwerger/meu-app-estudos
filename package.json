@@ -6,9 +6,10 @@
     "node": ">=22.5.0"
   },
   "scripts": {
+    "postinstall": "node scripts/copy-pdfjs-assets.mjs",
     "dev": "next dev",
-    "build": "next build",
-    "build:desktop": "next build && node scripts/copy-standalone-assets.mjs",
+    "build": "node scripts/copy-pdfjs-assets.mjs && next build",
+    "build:desktop": "node scripts/copy-pdfjs-assets.mjs && next build && node scripts/copy-standalone-assets.mjs",
     "start": "next start",
     "lint": "eslint",
     "tauri": "tauri"

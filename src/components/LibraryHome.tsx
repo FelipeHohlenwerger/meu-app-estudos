@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
 import CalibreBookCard from "@/components/CalibreBookCard";
+import FavoriteCard from "@/components/FavoriteCard";
+import type { FavoriteItem } from "@/lib/favoriteItems";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { formatRelativeTime } from "@/lib/relativeTime";
 import { formatTagLabel, normalizeTagKey } from "@/lib/tagTree";
@@ -21,16 +23,26 @@ type Props = {
   onViewFavorites: () => void;
   onToggleFavorite: (filename: string) => void;
   onCoverChanged: () => void;
-  // Biblioteca Calibre configurada — card de destaque (algumas capas + total)
-  // que leva pra página cheia da galeria. Ausente/vazia quando não há
-  // biblioteca configurada, o card inteiro some.
+  // Catálogo Calibre COMPLETO, sem filtro por vault — usado só pra montar a
+  // seção Favoritos (um livro já favoritado não pode sumir por estar fora do
+  // filtro de Assuntos da vault ativa, ver calibreLibraryPreview abaixo).
   calibreBooks: CalibreBook[];
+  // Catálogo já filtrado pelos Assuntos selecionados pra vault ativa (ver
+  // calibreBooksInVaultScope em page.tsx; [] de seleção = igual a
+  // calibreBooks) — usado na faixa de prévia "Biblioteca Calibre" abaixo,
+  // que leva pra página cheia da galeria (também filtrada).
+  calibreLibraryPreview: CalibreBook[];
   // Erro da última busca da biblioteca Calibre (ver page.tsx) — sem isso, uma
   // falha no servidor e "sem biblioteca configurada" pareciam a mesma coisa
   // (card some em silêncio nos dois casos).
   calibreError: string | null;
   onOpenCalibreBook: (book: CalibreBook) => void;
   onViewCalibreLibrary: () => void;
+  // Favoritos de livro do Calibre — estado global (não por vault), ver
+  // page.tsx. Usados tanto na seção "Favoritos" (mistura com notas
+  // favoritadas) quanto na estrela do preview "Biblioteca Calibre" abaixo.
+  calibreFavoriteIds: Set<number>;
+  onToggleCalibreFavorite: (bookId: number) => void;
   onOpenNewNoteMenu: (rect: DOMRect, direction?: "down-right" | "up-left") => void;
   onFileDropped: (file: File) => void;
   // Mesmas 3 ações do menu "+" — reaproveitadas em destaque no estado vazio
@@ -266,6 +278,73 @@ function CardRow({
   );
 }
 
+// Mesma mecânica de "quantos cabem na largura disponível" do CardRow acima,
+// mas pra uma lista mista nota/livro do Calibre (ver FavoriteCard.tsx) — só
+// a seção "Favoritos" precisa disso, então fica local aqui em vez de virar
+// um hook compartilhado por enquanto (CardRow também é local ao arquivo).
+function MixedCardRow({
+  items,
+  onOpenNote,
+  onRenameNote,
+  onDeleteNote,
+  onToggleFavorite,
+  onOpenCalibreBook,
+  onToggleCalibreFavorite,
+  onCoverChanged,
+}: {
+  items: FavoriteItem[];
+  onOpenNote: (filename: string) => void;
+  onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
+  onDeleteNote: (filename: string) => void;
+  onToggleFavorite: (filename: string) => void;
+  onOpenCalibreBook: (book: CalibreBook) => void;
+  onToggleCalibreFavorite: (bookId: number) => void;
+  onCoverChanged: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      setContainerWidth(entries[0].contentRect.width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const perCardWidth = CARD_ROW_MIN_WIDTH + CARD_ROW_GAP;
+  const fittable = containerWidth > 0 ? Math.max(1, Math.floor((containerWidth + CARD_ROW_GAP) / perCardWidth)) : 4;
+  const visibleItems = items.slice(0, fittable);
+  const itemKey = (item: FavoriteItem) => (item.kind === "note" ? item.note.filename : `calibre:${item.book.id}`);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${Math.max(visibleItems.length, 1)}, ${CARD_ROW_MIN_WIDTH}px)`,
+        gap: `${CARD_ROW_GAP}px`,
+      }}
+    >
+      {visibleItems.map((item) => (
+        <FavoriteCard
+          key={itemKey(item)}
+          item={item}
+          onOpenNote={onOpenNote}
+          onRenameNote={onRenameNote}
+          onDeleteNote={onDeleteNote}
+          onToggleFavorite={onToggleFavorite}
+          onOpenCalibreBook={onOpenCalibreBook}
+          onToggleCalibreFavorite={onToggleCalibreFavorite}
+          onCoverChanged={onCoverChanged}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function LibraryHome({
   notes,
   onOpenNote,
@@ -278,9 +357,12 @@ export default function LibraryHome({
   onToggleFavorite,
   onCoverChanged,
   calibreBooks,
+  calibreLibraryPreview,
   calibreError,
   onOpenCalibreBook,
   onViewCalibreLibrary,
+  calibreFavoriteIds,
+  onToggleCalibreFavorite,
   onOpenNewNoteMenu,
   onFileDropped,
   onCreateBlank,
@@ -321,7 +403,21 @@ export default function LibraryHome({
   // CardRow — ele mesmo decide quantas cabem na largura disponível (nunca
   // mais que isso em tela, então o resto seria descartado de qualquer forma).
   const recentNotes = [...notes].sort((a, b) => b.lastActivityMs - a.lastActivityMs).slice(0, 12);
-  const favoriteNotes = notes.filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs).slice(0, 12);
+  // Notas favoritas por recência (como sempre), livros do Calibre favoritados
+  // por título ANEXADOS depois — sem tentar interleavar por um timestamp
+  // comum (notas não guardam "quando foi favoritada", só livros do Calibre
+  // têm favorited_at; forçar os dois na mesma ordenação seria menos
+  // previsível do que manter cada critério simples e separado).
+  const favoriteItems: FavoriteItem[] = [
+    ...notes
+      .filter((n) => n.isFavorite)
+      .sort((a, b) => b.lastActivityMs - a.lastActivityMs)
+      .map((note): FavoriteItem => ({ kind: "note", note })),
+    ...calibreBooks
+      .filter((b) => calibreFavoriteIds.has(b.id))
+      .sort((a, b) => a.title.localeCompare(b.title))
+      .map((book): FavoriteItem => ({ kind: "calibre", book })),
+  ].slice(0, 12);
 
   const sectionDividerStyle = { borderTop: "0.5px solid var(--panel-border)", paddingTop: "2rem", marginTop: "2rem" };
 
@@ -391,7 +487,7 @@ export default function LibraryHome({
       {recentNotes.length > 0 && (
         <section style={sectionDividerStyle}>
           <div style={{ display: "flex", gap: "2rem" }}>
-            {favoriteNotes.length > 0 && (
+            {favoriteItems.length > 0 && (
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h2
                   className="tag-link"
@@ -400,12 +496,14 @@ export default function LibraryHome({
                 >
                   Favoritos
                 </h2>
-                <CardRow
-                  notes={favoriteNotes}
+                <MixedCardRow
+                  items={favoriteItems}
                   onOpenNote={onOpenNote}
                   onRenameNote={onRenameNote}
                   onDeleteNote={onDeleteNote}
                   onToggleFavorite={onToggleFavorite}
+                  onOpenCalibreBook={onOpenCalibreBook}
+                  onToggleCalibreFavorite={onToggleCalibreFavorite}
                   onCoverChanged={onCoverChanged}
                 />
               </div>
@@ -414,7 +512,7 @@ export default function LibraryHome({
                 presentes; sem Favoritos, Editados fica sozinho, sem linha
                 sobrando do lado. Mesmo padrão visual do divisor entre painéis
                 no modo Dividir Tela (page.tsx). */}
-            {favoriteNotes.length > 0 && <div style={{ width: "1px", flexShrink: 0, background: "var(--panel-border)" }} />}
+            {favoriteItems.length > 0 && <div style={{ width: "1px", flexShrink: 0, background: "var(--panel-border)" }} />}
             <div style={{ flex: 1, minWidth: 0 }}>
               <h2
                 className="tag-link"
@@ -511,17 +609,23 @@ export default function LibraryHome({
         </section>
       )}
 
-      {calibreBooks.length > 0 && (
+      {calibreLibraryPreview.length > 0 && (
         <section style={sectionDividerStyle}>
           <h2 className="tag-link" onClick={onViewCalibreLibrary} style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
             Biblioteca Calibre{" "}
             <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
-              ({calibreBooks.length} {calibreBooks.length === 1 ? "livro" : "livros"})
+              ({calibreLibraryPreview.length} {calibreLibraryPreview.length === 1 ? "livro" : "livros"})
             </span>
           </h2>
           <div style={{ display: "grid", gridTemplateColumns: `repeat(6, ${CARD_ROW_MIN_WIDTH}px)`, gap: "1rem" }}>
-            {calibreBooks.slice(0, 6).map((book) => (
-              <CalibreBookCard key={book.id} book={book} onClick={() => onOpenCalibreBook(book)} />
+            {calibreLibraryPreview.slice(0, 6).map((book) => (
+              <CalibreBookCard
+                key={book.id}
+                book={book}
+                onClick={() => onOpenCalibreBook(book)}
+                isFavorite={calibreFavoriteIds.has(book.id)}
+                onToggleFavorite={() => onToggleCalibreFavorite(book.id)}
+              />
             ))}
           </div>
         </section>

@@ -155,16 +155,141 @@ body {
   text-decoration: underline;
 }
 
-/* Link quebrado (nota não existe): mesmo problema do span aninhado acima,
-   mas aqui é regressão de verdade — sem isso o texto ficava azul (cor de
-   link válido) por cima do sublinhado ondulado vermelho de aviso, escondendo
-   o principal sinal visual de "essa nota não existe". Cor igual ao style
-   inline de brokenWikiLinkMarkFor/brokenWikiPageLinkMarkFor/etc. em
-   livePreview.ts (mantida como literal ali, sem variável própria — segue o
-   mesmo padrão). */
+/* Link quebrado (nota não existe): "nota fantasma" — discreta de propósito
+   (cor fraca, sem sublinhado), não um aviso chamativo; mesmo problema do span
+   aninhado acima, então precisa do !important pra não ficar azul (cor de
+   link válido) por cima. Cor igual ao style inline de brokenWikiLinkMarkFor/
+   brokenWikiPageLinkMarkFor/etc. em livePreview.ts (var(--text-muted)). */
 .wiki-link-broken *,
 .wiki-page-link-broken *,
 .wiki-chapter-link-broken *,
 .wiki-block-link-broken * {
-  color: #d04444 !important;
+  color: var(--text-muted) !important;
+  transition: color 0.12s ease;
+}
+
+/* Hover do link quebrado: continua discreto em repouso, mas precisa de ALGUM
+   sinal ao passar o mouse (além do cursor pointer) de que é clicável e leva
+   a criar a nota — sublinhado TRACEJADO (não sólido, pra não parecer um link
+   válido) + leve clareamento, só nesse estado. */
+.wiki-link-broken:hover,
+.wiki-page-link-broken:hover,
+.wiki-chapter-link-broken:hover,
+.wiki-block-link-broken:hover {
+  text-decoration: underline dashed !important;
+  text-decoration-thickness: 1px;
+}
+.wiki-link-broken:hover *,
+.wiki-page-link-broken:hover *,
+.wiki-chapter-link-broken:hover *,
+.wiki-block-link-broken:hover * {
+  color: var(--foreground) !important;
+}
+
+/* Camada de texto selecionável do PdfViewer.tsx (pdfjs-dist TextLayer),
+   sobreposta ao <canvas> de cada página. Regras mínimas extraídas de
+   node_modules/pdfjs-dist/web/pdf_viewer.css (.textLayer) — usamos a classe
+   TextLayer "crua" do core do pdf.js diretamente (sem a camada
+   web/pdf_viewer.mjs, que é quem normalmente define estas regras E quem
+   normalmente seta --total-scale-factor via JS por página). A geometria dos
+   spans (posição/tamanho de fonte) que o pdf.js calcula é em unidades BRUTAS
+   de página PDF (não em pixels finais) — por isso --total-scale-factor
+   precisa ser igual à escala de renderização atual pra o texto ficar do
+   tamanho certo por cima do canvas; PdfViewer.tsx seta essa custom property
+   por página (style.setProperty) antes de construir cada TextLayer, então
+   aqui só existe um fallback (1) pro caso de nunca ter sido setada ainda.
+   --scale-round-x/--scale-round-y são exigidas pelo cálculo interno de
+   largura/altura do próprio pdf.js (setLayerDimensions) — mesmos valores
+   padrão de pdf_viewer.css. Omitido de propósito: estilos de anotação/
+   formulário/edição de highlight do pdf.js (.annotationLayer, .highlight
+   etc.) — não usados neste app. */
+.textLayer {
+  --total-scale-factor: 1;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  -moz-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 1;
+}
+
+.textLayer span,
+.textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.textLayer .markedContent {
+  display: contents;
+}
+
+.textLayer span[role="img"] {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+}
+
+.textLayer.selecting .endOfContent {
+  top: 0;
+}
+
+.textLayer ::-moz-selection {
+  background: color-mix(in srgb, AccentColor, transparent 50%);
+  color: transparent;
+}
+
+.textLayer ::selection {
+  background: color-mix(in srgb, AccentColor, transparent 50%);
+  color: transparent;
+}
+
+.textLayer br::-moz-selection {
+  background: transparent;
+}
+
+.textLayer br::selection {
+  background: transparent;
 }

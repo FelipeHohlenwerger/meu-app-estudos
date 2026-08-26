@@ -3,7 +3,10 @@
 import { useEffect, useState } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
 import SubtemaCard from "@/components/SubtemaCard";
+import CalibreBookCard from "@/components/CalibreBookCard";
 import GraphView, { type GraphNode, type GraphEdge } from "@/components/GraphView";
+import type { CalibreBook } from "@/lib/calibreLibrary";
+import { calibrePseudoFilename } from "@/lib/calibreLink";
 import { matchesTypeFilter, CONTENT_TYPE_FILTER_OPTIONS, type ContentTypeFilter } from "@/lib/noteStatus";
 import { formatTagLabel, normalizeTagKey, buildTagNoteTree, collectAllNotes, type TagNoteTreeNode } from "@/lib/tagTree";
 import { useVault } from "@/lib/vaultContext";
@@ -74,6 +77,13 @@ type Props = {
   // Chamado depois de adicionar/trocar/remover a capa de um subtema — quem
   // usa esta página decide como refletir isso (refetch de tagCovers).
   onTagCoverChanged: () => void;
+  // Livro do Calibre não tem tag própria no app — "pertencer" a este tema só
+  // existe via nota que cita ([[Título]]) ou vincula ("Vincular") e tem essa
+  // tag (ou subtema, ver GET /api/tag/calibre-books). Favoritos/onOpen mesmo
+  // padrão do resto do app (ver page.tsx).
+  onOpenCalibreBook: (book: CalibreBook) => void;
+  calibreFavoriteIds: Set<number>;
+  onToggleCalibreFavorite: (bookId: number) => void;
 };
 
 // Página de foco por tag hierárquica — aberta ao clicar no nome de um
@@ -99,6 +109,9 @@ export default function TagFocusPage({
   onToggleFavorite,
   tagCovers,
   onTagCoverChanged,
+  onOpenCalibreBook,
+  calibreFavoriteIds,
+  onToggleCalibreFavorite,
 }: Props) {
   const { vaultFetch } = useVault();
   const [typeFilter, setTypeFilter] = useState<ContentTypeFilter>("all");
@@ -130,6 +143,24 @@ export default function TagFocusPage({
   const tagPath = normalizeTagKey(rawTagPath);
   const segments = tagPath.split(".");
   const currentSegment = segments[segments.length - 1];
+
+  // Livros do Calibre relacionados INDIRETAMENTE a este tema — buscados a
+  // cada troca de tagPath (diferente do grafo global do Modo Mapa, que só
+  // busca uma vez). Sem esses livros na página, o filtro "Livros" nunca
+  // mostrava nada vindo do Calibre (só PDF/EPUB antigo enviado direto ao
+  // vault, com tag própria).
+  const [tagCalibreBooks, setTagCalibreBooks] = useState<CalibreBook[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    vaultFetch(`/api/tag/calibre-books?tag=${encodeURIComponent(tagPath)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && Array.isArray(data.books)) setTagCalibreBooks(data.books);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tagPath, vaultFetch]);
   // Nível acima na trilha — não a Homepage direto, exceto quando já estamos
   // num macro-tema (nível 1, sem "." no path).
   const parentPath = segments.length > 1 ? segments.slice(0, -1).join(".") : null;
@@ -138,6 +169,9 @@ export default function TagFocusPage({
   // Uma árvore só, reaproveitada pelos 3 modos abaixo — ver comentário do
   // componente.
   const tree = buildTagNoteTree(tagPath, filteredNotes);
+  // Livro do Calibre sempre é "book" — some do filtro "Artigos"/"Notas",
+  // igual TagNoteList.tsx faz pra Favoritos.
+  const visibleCalibreBooks = typeFilter === "all" || typeFilter === "book" ? tagCalibreBooks : [];
 
   function renderGrid(groupNotes: LibraryNote[]) {
     return (
@@ -231,6 +265,8 @@ export default function TagFocusPage({
       <h1 style={{ ...serifStyle, fontSize: "2.4em", margin: 0 }}>{formatTagLabel(currentSegment)}</h1>
       <p style={{ color: "var(--text-muted)", marginTop: "0.4rem" }}>
         {filteredNotes.length} {filteredNotes.length === 1 ? "nota" : "notas"}
+        {visibleCalibreBooks.length > 0 &&
+          `, ${visibleCalibreBooks.length} ${visibleCalibreBooks.length === 1 ? "livro" : "livros"} (Calibre)`}
       </p>
 
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "1.5rem" }}>
@@ -253,12 +289,41 @@ export default function TagFocusPage({
 
       {viewMode === "overview" && <OverviewMode tree={tree} renderGrid={renderGrid} />}
 
+      {/* Livro do Calibre não tem posição própria na árvore de subtemas (só
+          "pertence ou não" ao tema inteiro, ver getCalibreBooksForTagPath) —
+          por isso uma seção só, fora de NavMode/OverviewMode, em vez de
+          tentar encaixar em cada nó. Fica de fora do Modo Mapa (que já
+          mostra os mesmos livros como nó, ver buildMapGraph/MapMode). */}
+      {viewMode !== "map" && visibleCalibreBooks.length > 0 && (
+        <section style={sectionDividerStyle}>
+          <h2 style={{ ...serifStyle, fontSize: "1.3em", margin: "0 0 1rem 0" }}>
+            Livros (Calibre){" "}
+            <span style={{ fontFamily: "Arial, Helvetica, sans-serif", fontSize: "0.6em", color: "var(--text-muted)" }}>
+              ({visibleCalibreBooks.length} {visibleCalibreBooks.length === 1 ? "livro" : "livros"})
+            </span>
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, ${CARD_WIDTH}px)`, gap: "1rem" }}>
+            {visibleCalibreBooks.map((book) => (
+              <CalibreBookCard
+                key={book.id}
+                book={book}
+                onClick={() => onOpenCalibreBook(book)}
+                isFavorite={calibreFavoriteIds.has(book.id)}
+                onToggleFavorite={() => onToggleCalibreFavorite(book.id)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       {viewMode === "map" && (
         <MapMode
           tree={tree}
           tagPath={tagPath}
           globalWikilinkEdges={globalWikilinkEdges}
+          tagCalibreBooks={tagCalibreBooks}
           onOpenNote={onOpenNote}
+          onOpenCalibreBook={onOpenCalibreBook}
           onNavigateToTag={(path) => {
             setViewMode("nav");
             onNavigate(path);
@@ -371,9 +436,18 @@ function OverviewMode({ tree, renderGrid }: { tree: TagNoteTreeNode<LibraryNote>
 // subárvore, arestas de hierarquia (tag→filho tag, tag→suas próprias notas) e
 // arestas de wikilink (só as que cruzam duas notas desta mesma subárvore, do
 // grafo global já usado pelo Graph View). ---
+// Livros do Calibre entram como um nó "calibre" a mais (mesmo formato de
+// addCalibreConnections em vaultIndex.ts, `tag: null` — não têm posição
+// própria na hierarquia) — sem isso, ANTES desta correção, uma aresta do
+// grafo global conectando uma nota da subárvore a um livro do Calibre nunca
+// sobrevivia ao filtro abaixo (as duas pontas precisavam estar em
+// noteFilenames, que nunca continha uma pseudo-filename de livro), e nó de
+// livro nenhum era criado — Modo Mapa nunca mostrava livro do Calibre,
+// mesmo citado/vinculado por uma nota da subárvore.
 function buildMapGraph(
   tree: TagNoteTreeNode<LibraryNote>,
-  globalWikilinkEdges: GraphEdge[] | null
+  globalWikilinkEdges: GraphEdge[] | null,
+  tagCalibreBooks: CalibreBook[]
 ): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
@@ -395,8 +469,18 @@ function buildMapGraph(
   }
   visit(tree);
 
+  const calibreFilenames = new Set<string>();
+  for (const book of tagCalibreBooks) {
+    const pseudoFilename = calibrePseudoFilename(book);
+    if (!calibreFilenames.has(pseudoFilename)) {
+      calibreFilenames.add(pseudoFilename);
+      nodes.push({ filename: pseudoFilename, title: book.title, tag: null, kind: "calibre" });
+    }
+  }
+
+  const allFilenames = new Set([...noteFilenames, ...calibreFilenames]);
   for (const e of globalWikilinkEdges ?? []) {
-    if (noteFilenames.has(e.source) && noteFilenames.has(e.target)) {
+    if (allFilenames.has(e.source) && allFilenames.has(e.target)) {
       edges.push({ source: e.source, target: e.target, kind: "wikilink" });
     }
   }
@@ -408,16 +492,21 @@ function MapMode({
   tree,
   tagPath,
   globalWikilinkEdges,
+  tagCalibreBooks,
   onOpenNote,
+  onOpenCalibreBook,
   onNavigateToTag,
 }: {
   tree: TagNoteTreeNode<LibraryNote>;
   tagPath: string;
   globalWikilinkEdges: GraphEdge[] | null;
+  tagCalibreBooks: CalibreBook[];
   onOpenNote: (filename: string) => void;
+  onOpenCalibreBook: (book: CalibreBook) => void;
   onNavigateToTag: (tagPath: string) => void;
 }) {
-  const { nodes, edges } = buildMapGraph(tree, globalWikilinkEdges);
+  const { nodes, edges } = buildMapGraph(tree, globalWikilinkEdges, tagCalibreBooks);
+  const calibreById = new Map(tagCalibreBooks.map((b) => [calibrePseudoFilename(b), b]));
 
   if (nodes.length <= 1) {
     return <p style={{ color: "var(--text-muted)", marginTop: "2rem" }}>Nenhuma nota encontrada.</p>;
@@ -433,7 +522,10 @@ function MapMode({
         centerFilename={tagPath}
         onSelectNode={(id, kind) => {
           if (kind === "note") onOpenNote(id);
-          else if (id !== tagPath) onNavigateToTag(id);
+          else if (kind === "calibre") {
+            const book = calibreById.get(id);
+            if (book) onOpenCalibreBook(book);
+          } else if (id !== tagPath) onNavigateToTag(id);
         }}
       />
     </div>

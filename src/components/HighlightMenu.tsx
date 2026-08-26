@@ -8,6 +8,20 @@ const TIPOS_FUNDO = ["conceito", "duvidas", "referencias", "exemplo", "acao", "o
 const TIPOS_SUBLINHADO = [...TIPOS_FUNDO, "preto", "azul"];
 const TIPOS_COMENTARIO = [...TIPOS_FUNDO];
 
+// Globo simples (círculo + meridianos) — substitui o emoji 🌐, que em alguns
+// sistemas do usuário renderiza como quadrado vazio (glyph ausente na fonte).
+// Mesmo estilo dos ícones SVG inline já usados no resto do app (ver
+// EditIcon/FullscreenIcon em NotePanel.tsx): stroke=currentColor, sem lib nova.
+function TranslateIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z" />
+    </svg>
+  );
+}
+
 type Props = {
   x: number;
   y: number;
@@ -217,6 +231,9 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
             <button
               onClick={onTranslate}
               style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.4rem",
                 padding: "0.3rem 0.6rem",
                 fontSize: "12px",
                 textAlign: "left",
@@ -227,7 +244,7 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
                 cursor: "pointer",
               }}
             >
-              🌐 Traduzir
+              <TranslateIcon /> Traduzir
             </button>
           )}
         </div>

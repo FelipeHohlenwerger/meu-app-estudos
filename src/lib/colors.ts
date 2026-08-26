@@ -66,6 +66,15 @@ export const GRAPH_TAG_NODE_COLOR = "#5fb3a6";
 export const GRAPH_CALIBRE_NODE_COLOR = "#d4a843";
 export const GRAPH_CALIBRE_GLOW_COLOR = "#f0c95f";
 
+// Nó "nota fantasma" no Graph View (link [[Título]] que não resolve pra
+// nenhuma nota nem livro do Calibre, ver GraphNode.kind "ghost" em
+// GraphView.tsx/vaultIndex.ts) — mesma forma/glow pulsante do nó "nota",
+// mas num cinza dessaturado (não o branco/azulado de NODE_COLOR/GLOW_COLOR)
+// pra ler como "presença apagada" mesmo antes de reparar na opacidade
+// reduzida do nó — nunca confundível de longe com uma nota de verdade.
+export const GRAPH_GHOST_NODE_COLOR = "#8a8d99";
+export const GRAPH_GHOST_GLOW_COLOR = "#5f6270";
+
 // Cor por nível de heading (# até ######) no corpo da nota — índice 0 = H1.
 // Só cor; tamanho de fonte continua definido separadamente em livePreview.ts.
 export const HEADING_COLORS: string[] = [

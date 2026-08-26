@@ -104,6 +104,10 @@ function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number)
   });
 }
 
+// Formato nativo de book.navigation.toc (epub.js) — recursivo, uma entrada
+// por capítulo/subseção do sumário do próprio EPUB.
+export type TocEntry = { id: string; href: string; label: string; subitems?: TocEntry[] };
+
 type Props = {
   filename: string;
   theme: "dark" | "light";
@@ -119,11 +123,18 @@ type Props = {
   // EPUB não tem página fixa (o texto reflui), por isso a navegação/link é
   // por capítulo, não por página como no PDF.
   initialChapter?: number;
+  // CFI (referência de posição do epub.js, estável entre reflows de fonte
+  // diferente de número de página) de uma posição de leitura salva
+  // anteriormente — usado só como FALLBACK quando não há initialChapter
+  // (link explícito sempre tem prioridade, ver NotePanel.tsx). Também
+  // aplicado num efeito próprio caso chegue DEPOIS da montagem (a busca da
+  // posição salva é assíncrona).
+  initialCfi?: string;
   // Chamado quando um marcador de comentário ancorado (ver acima) é clicado
   // — NotePanel.tsx reusa o mesmo estado que já abre/rola o painel de
   // comentários pro marcador de .md.
   onMarkerClick?: (commentId: number) => void;
-  // Só passados pra livro do Calibre — ver PdfNativeViewer.tsx (mesmo
+  // Só passados pra livro do Calibre — ver PdfViewer.tsx (mesmo
   // espírito). calibreId roteia os comentários ancorados auto-contidos
   // (gerados pelas ações de IA) pras rotas /api/calibre/book-comments em vez
   // de /api/book-comments.
@@ -134,6 +145,16 @@ type Props = {
   // este componente (NotePanel.tsx) mostra esse texto na linha compacta do
   // cabeçalho, em vez deste componente renderizar sua própria linha.
   onPositionChange?: (label: string) => void;
+  // CFI real da posição atual (relocated de verdade, não só o índice) — pra
+  // NotePanel.tsx salvar automaticamente a posição de leitura (debounced).
+  onCfiChange?: (cfi: string) => void;
+  // Índice de spine (0-based) da posição atual — alimenta o destaque de
+  // "capítulo atual" no painel de Sumário (EpubTocDrawer.tsx), sem precisar
+  // reprocessar a label "Capítulo N de M".
+  onChapterIndexChange?: (spineIndex: number) => void;
+  // Sumário nativo do livro (book.navigation.toc), repassado uma vez após o
+  // carregamento — alimenta o painel de Sumário.
+  onTocLoaded?: (toc: TocEntry[]) => void;
   // Clique/tecla dentro do conteúdo do livro (iframe próprio, ver comentário
   // grande sobre rendition.hooks.content.register abaixo) — um clique ali
   // NUNCA borbulha pro document externo (isolamento normal de iframe), então
@@ -168,6 +189,12 @@ export type EpubViewerHandle = {
   // NotePanel.tsx (o botão "Copiar link" não vive mais dentro deste
   // componente, ver cabeçalho compacto).
   copyCurrentLink: () => void;
+  // Resolve o href de uma entrada do Sumário pro índice de spine
+  // correspondente (0-based), pra comparar contra o "capítulo atual" e
+  // destacar a entrada certa em EpubTocDrawer.tsx — book.spine.get() já
+  // corta o fragmento ("#secao2") antes de procurar, então uma subseção
+  // dentro de um capítulo resolve pro mesmo índice do capítulo automaticamente.
+  getSpineIndexForHref: (href: string) => number | null;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -206,11 +233,15 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     fontSize,
     noteFont,
     initialChapter,
+    initialCfi,
     onMarkerClick,
     sourceUrl,
     linkLabel,
     calibreId,
     onPositionChange,
+    onCfiChange,
+    onChapterIndexChange,
+    onTocLoaded,
     onContentInteraction,
     onOpenTranslate,
     onSelectionChange,
@@ -235,6 +266,12 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   onMarkerClickRef.current = onMarkerClick;
   const onPositionChangeRef = useRef(onPositionChange);
   onPositionChangeRef.current = onPositionChange;
+  const onCfiChangeRef = useRef(onCfiChange);
+  onCfiChangeRef.current = onCfiChange;
+  const onChapterIndexChangeRef = useRef(onChapterIndexChange);
+  onChapterIndexChangeRef.current = onChapterIndexChange;
+  const onTocLoadedRef = useRef(onTocLoaded);
+  onTocLoadedRef.current = onTocLoaded;
   const onContentInteractionRef = useRef(onContentInteraction);
   onContentInteractionRef.current = onContentInteraction;
   const onOpenTranslateRef = useRef(onOpenTranslate);
@@ -272,6 +309,9 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     copyCurrentLink() {
       if (!currentChapterRef.current) return;
       navigator.clipboard.writeText(`[[${linkLabel ?? filename}#cap${currentChapterRef.current}]]`);
+    },
+    getSpineIndexForHref(href: string) {
+      return bookRef.current?.spine?.get(href)?.index ?? null;
     },
   }));
 
@@ -379,13 +419,36 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
         { openAs: "epub" }
       );
       bookRef.current = book;
-      const rendition = book.renderTo(viewerEl, {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const renditionOptions: any = {
         width: initialSize.width,
         height: initialSize.height,
         flow: "scrolled",
         manager: "continuous",
         spread: "none",
-      });
+        // Sem isso (padrão do epub.js: offset 500/offsetDelta 250), TODA
+        // chamada de display() — link de capítulo, clique no Sumário,
+        // retomada de posição salva — pousa fora do lugar certo: logo após
+        // exibir a seção alvo com scrollTop=0, o manager "continuous" checa
+        // se `scrollTop - offset < 0" (sempre verdadeiro com offset > 0
+        // nesse instante) e PREPENDA automaticamente a seção ANTERIOR pra
+        // manter uma margem de pré-carregamento — o ajuste de scroll feito
+        // pra compensar essa inserção depende de eventos de resize
+        // assíncronos (imagens/fontes carregando), então frequentemente erra
+        // e deixa a posição visível ANTES do começo real da seção alvo (ou
+        // seja, parece "no meio" do capítulo ANTERIOR, não no início do
+        // capítulo clicado). offset:0 faz esse cálculo nunca disparar numa
+        // navegação fresca (scrollTop já começa em 0), sem afetar o
+        // pré-carregamento de seções durante rolagem normal (que continua
+        // reagindo ao scroll de verdade, só sem a margem antecipada).
+        // `offset`/`offsetDelta` são configurações do manager "continuous"
+        // específico do epub.js (ver ContinuousViewManager em
+        // node_modules/epubjs/src/managers/continuous/index.js) — não
+        // declaradas no tipo RenditionOptions dos @types, por isso `any`.
+        offset: 0,
+        offsetDelta: 0,
+      };
+      const rendition = book.renderTo(viewerEl, renditionOptions);
       renditionRef.current = rendition;
 
       // Coluna de leitura confortável, centralizada, nunca maior que o espaço
@@ -430,9 +493,13 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
 
       await book.ready;
       if (cancelled) return;
-      const initialHref = initialChapter ? resolveChapterHref(book, initialChapter) : undefined;
+      // Prioridade: capítulo de link explícito > CFI de posição salva > início
+      // do livro (rendition.display já aceita href OU CFI diretamente).
+      const initialHref = initialChapter ? resolveChapterHref(book, initialChapter) : initialCfi;
       await rendition.display(initialHref);
       if (cancelled) return;
+
+      onTocLoadedRef.current?.((book.navigation?.toc ?? []) as TocEntry[]);
 
       // O manager "continuous" do epub.js, por padrão, destrói (trim) capítulos
       // que saem da janela de leitura e, ao remover um capítulo ACIMA da posição
@@ -451,11 +518,13 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       const manager = (rendition as any).manager;
       if (manager) manager.trim = () => Promise.resolve();
 
-      rendition.on("relocated", (location: { start: { index: number } }) => {
+      rendition.on("relocated", (location: { start: { index: number; cfi: string } }) => {
         const chapterNumber = location.start.index + 1;
         const total = (book!.spine as unknown as { length: number }).length;
         currentChapterRef.current = chapterNumber;
         onPositionChangeRef.current?.(`Capítulo ${chapterNumber} de ${total}`);
+        onCfiChangeRef.current?.(location.start.cfi);
+        onChapterIndexChangeRef.current?.(location.start.index);
       });
 
       // Seleção de texto finalizada — evento de alto nível do próprio
@@ -550,6 +619,16 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     const href = resolveChapterHref(bookRef.current, initialChapter);
     if (href) renditionRef.current?.display(href);
   }, [initialChapter]);
+
+  // Mesma ideia, mas pra CFI de posição salva — cobre o caso (raro) de a
+  // busca assíncrona da posição salva (NotePanel.tsx) resolver DEPOIS que o
+  // rendition já montou no início do livro. Só age quando não há capítulo
+  // explícito (prioridade do link, mesmo raciocínio da montagem acima).
+  useEffect(() => {
+    if (!initialCfi || initialChapter || !bookRef.current) return;
+    renditionRef.current?.display(initialCfi);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCfi]);
 
   // Reaplica cores/fonte/tamanho de leitura (sem recriar o rendition) quando
   // o tema do app muda (claro/escuro) ou a pessoa troca fonte/tamanho no

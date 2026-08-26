@@ -8,8 +8,9 @@ import TagFocusPage from "@/components/TagFocusPage";
 import CalibreLibraryPage from "@/components/CalibreLibraryPage";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { calibrePseudoFilename } from "@/lib/calibreLink";
+import type { FavoriteItem } from "@/lib/favoriteItems";
 import { StarIcon, type LibraryNote } from "@/components/NoteCard";
-import { buildTagTree, filterTagTree, formatTagLabel, normalizeTagKey, type TagTreeNode } from "@/lib/tagTree";
+import { buildTagTree, filterTagTree, formatTagLabel, isPathWithin, normalizeTagKey, type TagTreeNode } from "@/lib/tagTree";
 import NewNoteMenu from "@/components/NewNoteMenu";
 import NoteRowMenu from "@/components/NoteRowMenu";
 import ConfirmModal from "@/components/ConfirmModal";
@@ -190,6 +191,15 @@ export default function Home() {
   // livro configurado" eram indistinguíveis na UI — as duas produziam lista
   // vazia em silêncio.
   const [calibreError, setCalibreError] = useState<string | null>(null);
+  // Favoritos de livro do Calibre — estado GLOBAL (não por vault, ver
+  // calibreAnnotations.ts), buscado uma vez e mantido em memória; toggle
+  // otimista + PUT, mesmo espírito de toggleFavorite (notas) mais abaixo.
+  const [calibreFavoriteIds, setCalibreFavoriteIds] = useState<Set<number>>(new Set());
+  // Assuntos do Calibre selecionados pela vault ATIVA (ver
+  // calibre_subject_filter em vaultIndex.ts) — [] = sem filtro configurado,
+  // biblioteca inteira visível (opt-in). Diferente de calibreFavoriteIds
+  // acima: isto É por vault, refeito a cada troca (ver fetchCalibreSubjectFilter).
+  const [calibreSubjectFilter, setCalibreSubjectFilter] = useState<string[]>([]);
   // Filtro por tipo da aba "Tags" — escondido por padrão atrás do ícone de
   // livro ao lado da busca (usado com pouca frequência, mesmo espírito do
   // "⋯" do painel de imagem); não reseta ao trocar de aba, mesmo espírito de
@@ -517,14 +527,42 @@ export default function Home() {
     );
   }, [libraryNotes, sidebarSearch, sidebarTypeFilter]);
 
+  // Árvore de Assunto GLOBAL (todo o catálogo, sem filtro de vault nem de
+  // busca) — alimenta SÓ a modal de configuração do filtro por vault em
+  // VaultSwitcher.tsx. Distinta de sidebarCalibreSubjectTree (essa sim já
+  // filtrada, só pra exibição) — a modal precisa do catálogo inteiro pra
+  // permitir selecionar um assunto que a seleção ATUAL ainda não cobre.
+  const fullCalibreSubjectTree = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const book of calibreBooks) {
+      for (const subject of book.subjects) counts.set(subject, (counts.get(subject) ?? 0) + 1);
+    }
+    return buildTagTree(Array.from(counts.entries()));
+  }, [calibreBooks]);
+
+  // Escopo da vault ativa sobre o catálogo Calibre — único ponto de corte
+  // entre o catálogo GLOBAL (calibreBooks) e as superfícies que respeitam o
+  // filtro por vault (aba "Calibre" da sidebar via sidebarCalibreFiltered
+  // abaixo, página cheia da galeria, prévia da Homepage). calibreSubjectFilter
+  // vazio = sem filtro, catálogo inteiro (opt-in). Deliberadamente NÃO
+  // aplicado a: resolução do livro aberto em NotePanel (calibreBooks.find por
+  // id), tela de Favoritos, ou autocomplete de link [[Título]] — um livro já
+  // referenciado/favoritado não pode sumir por estar fora da seleção atual.
+  const calibreBooksInVaultScope = useMemo(() => {
+    if (calibreSubjectFilter.length === 0) return calibreBooks;
+    return calibreBooks.filter((book) =>
+      book.subjects.some((subject) => calibreSubjectFilter.some((selected) => isPathWithin(subject, selected)))
+    );
+  }, [calibreBooks, calibreSubjectFilter]);
+
   // Aba "Calibre" da sidebar: mesma busca compartilhada (título/autor, ao
   // contrário da busca só-por-título das outras abas), filtrada ANTES de
   // montar a árvore/agrupamentos abaixo — mesmo espírito de sidebarTagTree.
   const sidebarCalibreFiltered = useMemo(() => {
     const q = sidebarSearch.trim().toLowerCase();
-    if (!q) return calibreBooks;
-    return calibreBooks.filter((b) => b.title.toLowerCase().includes(q) || b.authors.some((a) => a.toLowerCase().includes(q)));
-  }, [calibreBooks, sidebarSearch]);
+    if (!q) return calibreBooksInVaultScope;
+    return calibreBooksInVaultScope.filter((b) => b.title.toLowerCase().includes(q) || b.authors.some((a) => a.toLowerCase().includes(q)));
+  }, [calibreBooksInVaultScope, sidebarSearch]);
 
   // Assunto: árvore hierárquica reaproveitando buildTagTree (genérico,
   // opera só em [string-com-ponto, count][]) — o campo "assunto" do Calibre
@@ -776,6 +814,32 @@ export default function Home() {
     };
   }, []);
 
+  // Favoritos de livro do Calibre — buscados uma vez (diferente da lista de
+  // livros em si, não precisa recarregar periodicamente: só muda por ação
+  // desta própria sessão, já refletida otimisticamente em toggleCalibreFavorite).
+  useEffect(() => {
+    fetch("/api/calibre/favorites")
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data.bookIds)) setCalibreFavoriteIds(new Set(data.bookIds));
+      });
+  }, []);
+
+  function toggleCalibreFavorite(bookId: number) {
+    setCalibreFavoriteIds((prev) => {
+      const next = new Set(prev);
+      const isFavorite = !next.has(bookId);
+      if (isFavorite) next.add(bookId);
+      else next.delete(bookId);
+      fetch("/api/calibre/favorites", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ calibreId: bookId, isFavorite }),
+      });
+      return next;
+    });
+  }
+
   // Mantém o ImageWidget (livePreview.ts) sabendo qual vault está ativo — ver
   // comentário lá sobre por que isso não pode vir de um Contexto React.
   useEffect(() => {
@@ -822,6 +886,19 @@ export default function Home() {
     fetchLibraryData();
   }
 
+  // Assuntos do Calibre selecionados por esta vault — mesmo padrão de
+  // fetchTagCovers acima (refeito a cada troca de vault, guard contra
+  // resposta obsoleta via activeVaultIdRef).
+  function fetchCalibreSubjectFilter() {
+    const requestedVaultId = activeVaultId;
+    vaultFetch("/api/calibre/subject-filter")
+      .then((res) => res.json())
+      .then((data) => {
+        if (activeVaultIdRef.current !== requestedVaultId) return;
+        if (Array.isArray(data.subjectPaths)) setCalibreSubjectFilter(data.subjectPaths);
+      });
+  }
+
   // Roda de novo sempre que o vault ativo muda (inclusive a primeira vez que
   // ele é resolvido), e de novo depois de cada save (pra refletir
   // título/aliases/notas novas na hora, sem precisar recarregar a página).
@@ -830,6 +907,7 @@ export default function Home() {
     fetchNoteTargets();
     fetchLibraryData();
     fetchTagCovers();
+    fetchCalibreSubjectFilter();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeVaultId]);
 
@@ -1210,38 +1288,52 @@ export default function Home() {
   }
 
   // Linha de um livro do Calibre na sidebar — versão bem mais simples de
-  // renderSidebarNoteRow (sem favorito/renomear/"...": livro do Calibre não
-  // tem nada disso no app, só abre pro visualizador).
+  // renderSidebarNoteRow (sem renomear/"...": livro do Calibre não tem nada
+  // disso no app, só abre pro visualizador) — mas COM favorito, mesmo
+  // padrão de botão de estrela ao lado.
   function renderCalibreBookRow(book: CalibreBook, indent: string) {
     const pseudoFilename = calibrePseudoFilename(book);
     const isOpen = pseudoFilename === panelA || pseudoFilename === panelB;
     return (
-      <button
-        onClick={() => {
-          if (isMobile) setMobileSidebarOpen(false);
-          openCalibreBook(book);
-        }}
-        style={{
-          display: "block",
-          width: "100%",
-          textAlign: "left",
-          padding: `0.4rem 0.5rem 0.4rem ${indent}`,
-          background: isOpen ? "var(--panel-hover)" : "transparent",
-          border: "none",
-          borderRadius: "4px",
-          cursor: "pointer",
-          color: "var(--foreground)",
-          fontSize: "0.85rem",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{book.title}</div>
-        {book.authors.length > 0 && (
-          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {book.authors.join(", ")}
-          </div>
-        )}
-      </button>
+      <div style={{ display: "flex", alignItems: "center", gap: "2px" }}>
+        <button
+          onClick={() => {
+            if (isMobile) setMobileSidebarOpen(false);
+            openCalibreBook(book);
+          }}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            textAlign: "left",
+            padding: `0.4rem 0.5rem 0.4rem ${indent}`,
+            background: isOpen ? "var(--panel-hover)" : "transparent",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+            overflow: "hidden",
+          }}
+        >
+          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{book.title}</div>
+          {book.authors.length > 0 && (
+            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {book.authors.join(", ")}
+            </div>
+          )}
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleCalibreFavorite(book.id);
+          }}
+          className="toolbar-link"
+          title={calibreFavoriteIds.has(book.id) ? "Remover dos favoritos" : "Marcar como favorito"}
+          style={{ flexShrink: 0, padding: "0.4rem 0.2rem", border: "none", borderRadius: "4px", cursor: "pointer", background: "transparent", display: "flex", alignItems: "center" }}
+        >
+          <StarIcon filled={calibreFavoriteIds.has(book.id)} />
+        </button>
+      </div>
     );
   }
 
@@ -1590,7 +1682,20 @@ export default function Home() {
           scope={graphScope}
           centerFilename={graphScope === "local" ? focusedFilename ?? undefined : undefined}
           activeNoteFilename={focusedFilename ?? undefined}
-          onSelectNode={(filename) => openNoteInPanel(filename)}
+          onSelectNode={(id, kind) => {
+            if (kind === "ghost") {
+              // `id` é a pseudo-filename "ghost:<título minúsculo>", não o
+              // título de verdade — recupera o título original (node.title)
+              // pra criar a nota, mesmo fluxo de createNoteFromLink em
+              // NotePanel.tsx pra um link quebrado clicado no editor.
+              const title = graphData.nodes.find((n) => n.filename === id)?.title ?? id;
+              handleCreateNoteFromLink(title).then((newFilename) => {
+                if (newFilename) openNoteInPanel(newFilename);
+              });
+              return;
+            }
+            openNoteInPanel(id);
+          }}
           isFullscreen={graphFullscreen}
           onToggleFullscreen={() => setGraphFullscreen((v) => !v)}
         />
@@ -1718,6 +1823,13 @@ export default function Home() {
             switchVault(vault.id);
           }}
           onDelete={removeVaultEntry}
+          calibreSubjectTree={fullCalibreSubjectTree}
+          onCalibreSubjectFilterSaved={(vaultId, subjectPaths) => {
+            // Editar o filtro da vault ATIVA precisa refletir na hora — a
+            // única outra escrita deste state é o efeito [activeVaultId],
+            // que só dispara ao trocar de vault.
+            if (vaultId === activeVaultId) setCalibreSubjectFilter(subjectPaths);
+          }}
         />
 
         {homeView.kind === "editor" && (
@@ -1821,9 +1933,12 @@ export default function Home() {
           onToggleFavorite={toggleFavorite}
           onCoverChanged={handleLibraryChanged}
           calibreBooks={calibreBooks}
+          calibreLibraryPreview={calibreBooksInVaultScope}
           calibreError={calibreError}
           onOpenCalibreBook={openCalibreBook}
           onViewCalibreLibrary={() => setHomeView({ kind: "calibreLibrary" })}
+          calibreFavoriteIds={calibreFavoriteIds}
+          onToggleCalibreFavorite={toggleCalibreFavorite}
           onOpenNewNoteMenu={openNewNoteMenu}
           onFileDropped={handleFileSelected}
           onCreateBlank={handleCreateBlank}
@@ -1864,6 +1979,9 @@ export default function Home() {
           onToggleFavorite={toggleFavorite}
           tagCovers={tagCovers}
           onTagCoverChanged={fetchTagCovers}
+          onOpenCalibreBook={openCalibreBook}
+          calibreFavoriteIds={calibreFavoriteIds}
+          onToggleCalibreFavorite={toggleCalibreFavorite}
         />
       )}
 
@@ -1887,16 +2005,29 @@ export default function Home() {
           heading="Favoritos"
           showTypeFilter
           notes={[...libraryNotes].filter((n) => n.isFavorite).sort((a, b) => b.lastActivityMs - a.lastActivityMs)}
+          calibreItems={calibreBooks
+            .filter((b) => calibreFavoriteIds.has(b.id))
+            .sort((a, b) => a.title.localeCompare(b.title))
+            .map((book): FavoriteItem => ({ kind: "calibre", book }))}
           onOpenNote={openNoteInPanel}
           onRenameNote={renameCardNote}
           onDeleteNote={requestDeleteNote}
           onDeleteMultiple={requestDeleteMultiple}
           onToggleFavorite={toggleFavorite}
+          onOpenCalibreBook={openCalibreBook}
+          onToggleCalibreFavorite={toggleCalibreFavorite}
         />
       )}
 
       {homeView.kind === "calibreLibrary" && (
-        <CalibreLibraryPage books={calibreBooks} error={calibreError} onBack={() => setHomeView({ kind: "library" })} onOpenBook={openCalibreBook} />
+        <CalibreLibraryPage
+          books={calibreBooksInVaultScope}
+          error={calibreError}
+          onBack={() => setHomeView({ kind: "library" })}
+          onOpenBook={openCalibreBook}
+          favoriteIds={calibreFavoriteIds}
+          onToggleFavorite={toggleCalibreFavorite}
+        />
       )}
 
       {/* Conteúdo principal: notas + painel(éis) de nota */}
@@ -2238,6 +2369,8 @@ export default function Home() {
           noteTargets={linkTargets}
           allTags={allTags}
           calibreBooks={calibreBooks}
+          calibreFavoriteIds={calibreFavoriteIds}
+          onToggleCalibreFavorite={toggleCalibreFavorite}
           closable={splitMode}
           onClose={closePanelA}
           onFocus={() => setFocusedPanel("a")}
@@ -2268,6 +2401,8 @@ export default function Home() {
               noteTargets={linkTargets}
               allTags={allTags}
               calibreBooks={calibreBooks}
+              calibreFavoriteIds={calibreFavoriteIds}
+              onToggleCalibreFavorite={toggleCalibreFavorite}
               closable
               onClose={closePanelB}
               onFocus={() => setFocusedPanel("b")}

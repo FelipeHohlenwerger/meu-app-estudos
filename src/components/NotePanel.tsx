@@ -39,8 +39,9 @@ import FontSizePopup from "@/components/FontSizePopup";
 import CoverMenu from "@/components/CoverMenu";
 import TagField, { TagChips } from "@/components/TagField";
 import { StarIcon } from "@/components/NoteCard";
-import PdfNativeViewer from "@/components/PdfNativeViewer";
-import EpubViewer, { type EpubViewerHandle } from "@/components/EpubViewer";
+import PdfViewer, { PDF_ZOOM_LEVELS, type PdfViewerHandle } from "@/components/PdfViewer";
+import EpubViewer, { type EpubViewerHandle, type TocEntry } from "@/components/EpubViewer";
+import EpubTocDrawer from "@/components/EpubTocDrawer";
 import BookCommentsPanel from "@/components/BookCommentsPanel";
 import LinkBookModal from "@/components/LinkBookModal";
 import ChatPanel from "@/components/ChatPanel";
@@ -206,6 +207,21 @@ function FocusModeIcon({ active }: { active: boolean }) {
   );
 }
 
+// Ícone do botão de Sumário (EpubTocDrawer.tsx) — só EPUB, sempre visível
+// (inclusive em modo foco, diferente de FocusModeIcon acima).
+function TocIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 6h13" />
+      <path d="M8 12h13" />
+      <path d="M8 18h13" />
+      <path d="M3 6h.01" />
+      <path d="M3 12h.01" />
+      <path d="M3 18h.01" />
+    </svg>
+  );
+}
+
 // Largura confortável de leitura, já validada pro corpo `.md` (coluna
 // centralizada em vez da largura inteira do painel) — reaproveitada também
 // pelo visualizador de PDF/EPUB (ver viewerKind), que antes não tinha
@@ -263,6 +279,11 @@ type NotePanelProps = {
   // rota [id] própria, mesmo padrão "bulk fetch, filtra em memória" do resto
   // do app.
   calibreBooks: CalibreBook[];
+  // Favoritos de livro do Calibre — estado global (ver page.tsx), pra
+  // estrela no cabeçalho do visualizador ter paridade com a do editor de
+  // notas (que já favorita direto do próprio cabeçalho).
+  calibreFavoriteIds: Set<number>;
+  onToggleCalibreFavorite: (bookId: number) => void;
   closable?: boolean;
   onClose?: () => void;
   onFocus: () => void;
@@ -297,7 +318,7 @@ const mobileToolSheetButtonStyle: CSSProperties = {
 };
 
 // Tudo que é "a nota atualmente aberta neste painel": título/tags/toolbar,
-// troca CodeMirror ↔ PdfNativeViewer ↔ EpubViewer, backlinks/menções, coluna de
+// troca CodeMirror ↔ PdfViewer ↔ EpubViewer, backlinks/menções, coluna de
 // bolhas de comentário, painel lateral de comentários (ancorado ou geral do
 // livro) e os overlays flutuantes (HighlightMenu, CalloutSlashMenu,
 // WikiLinkMenu, FootnotePopup, ImageControlPanel, FontSizePopup, CommentModal)
@@ -315,6 +336,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     noteTargets,
     allTags,
     calibreBooks,
+    calibreFavoriteIds,
+    onToggleCalibreFavorite,
     closable,
     onClose,
     onFocus,
@@ -384,8 +407,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     message?: string;
   } | null>(null);
   const translateDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Diferente de handleAiAction, nunca insere nada na nota: usa o endpoint
-  // gratuito do Google Tradutor, sem chave (ver translateServer.ts).
+  // Diferente de handleAiAction, nunca insere nada na nota: usa o MTranServer
+  // self-hosted (ver translateServer.ts).
   async function runTranslate(texto: string) {
     if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
     setTranslateState({ status: "loading" });
@@ -409,15 +432,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   }
   // Chamada tanto pelo watcher de seleção do CodeMirror quanto pelo callback
   // onSelectionChange do EpubViewer — só agenda se o painel já estiver
-  // aberto (senão qualquer seleção no app dispararia chamadas à toa). 900ms
-  // (não os ~400ms originais) — reduz o volume de chamadas reais em
-  // seleções feitas em sequência rápida; ver também o limitador de
-  // intervalo mínimo e o retry em translateServer.ts (proteção em duas
-  // camadas contra o 429 do endpoint gratuito).
+  // aberto (senão qualquer seleção no app dispararia chamadas à toa).
   function scheduleTranslateUpdate(texto: string) {
     if (!showTranslate) return;
     if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
-    translateDebounceRef.current = setTimeout(() => runTranslate(texto), 900);
+    translateDebounceRef.current = setTimeout(() => runTranslate(texto), 400);
   }
   useEffect(() => {
     return () => {
@@ -492,6 +511,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
   const editorViewRef = useRef<EditorView | null>(null);
   const epubViewerRef = useRef<EpubViewerHandle | null>(null);
+  const pdfViewerRef = useRef<PdfViewerHandle | null>(null);
   // Sinaliza (via setState, não só a ref) que o CodeMirror já criou a
   // EditorView de verdade — os efeitos que anexam listeners de evento
   // customizado em editorViewRef.current?.dom precisam disso na lista de
@@ -539,11 +559,12 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         ? "epub"
         : null;
 
-  // Número de página digitado à mão (PDF, ver PdfNativeViewer.tsx — não dá
-  // pra ler a página atual de volta do iframe nativo) — mostrado + editável
-  // na linha compacta do cabeçalho, não mais dentro do próprio visualizador.
-  // Reseta quando um novo link de página é clicado (mesmo gatilho que antes
-  // remontava o visualizador via `key`) ou o arquivo muda.
+  // Página atual do PDF (ver PdfViewer.tsx) — mostrada + editável na linha
+  // compacta do cabeçalho. Espelhada de dentro do visualizador via
+  // onPageChange (posição real de scroll, debounced) ou atualizada
+  // diretamente por navegação explícita (link de página, setas, campo
+  // digitado) — nunca é só um número solto: sempre corresponde à página que
+  // o visualizador está de fato mostrando (ver handlePdfPageChange abaixo).
   const pdfInitialPage =
     activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page"
       ? parseInt(activeViewerAnchor.value, 10) || undefined
@@ -553,6 +574,21 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     setPdfPageInput(pdfInitialPage ?? 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfInitialPage, filename]);
+  const [pdfNumPages, setPdfNumPages] = useState<number | null>(null);
+  const [pdfZoomPercent, setPdfZoomPercent] = useState(100);
+  // Campo "%" do cabeçalho vira editável ao clicar (valor livre, ver
+  // setZoomPercent em PdfViewer.tsx) — pdfZoomDraft é só o texto digitado
+  // em edição, aplicado no blur/Enter; pdfZoomPercent (acima) continua
+  // sendo sempre o valor de verdade, espelhado do próprio visualizador.
+  const [pdfZoomEditing, setPdfZoomEditing] = useState(false);
+  const [pdfZoomDraft, setPdfZoomDraft] = useState("");
+  const [pdfViewerError, setPdfViewerError] = useState<string | null>(null);
+  useEffect(() => {
+    setPdfNumPages(null);
+    setPdfZoomPercent(100);
+    setPdfZoomEditing(false);
+    setPdfViewerError(null);
+  }, [filename]);
 
   // Posição textual do EPUB ("Capítulo N de M") — espelhada de dentro do
   // visualizador via onPositionChange (EpubViewer.tsx), computada a partir
@@ -571,6 +607,234 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusMode, viewerKind]);
   const [linkCopyFeedback, setLinkCopyFeedback] = useState(false);
+
+  // Retomada automática de leitura (PDF página / EPUB CFI) — ver
+  // reading_positions em vaultIndex.ts / calibre_reading_positions em
+  // calibreAnnotations.ts. `undefined` = ainda carregando (ou pulado porque
+  // um link explícito de página/capítulo tem prioridade); `null` = carregado,
+  // sem posição salva.
+  const [pdfSavedPage, setPdfSavedPage] = useState<number | null | undefined>(undefined);
+  const [epubSavedCfi, setEpubSavedCfi] = useState<string | null | undefined>(undefined);
+  const pdfPageInputRef = useRef(pdfPageInput);
+  pdfPageInputRef.current = pdfPageInput;
+  // Espelha pdfSavedPage — o efeito de flush abaixo precisa saber se a
+  // busca da posição salva já resolveu (`undefined` = ainda carregando)
+  // antes de decidir se `pdfPageInputRef.current` é seguro pra gravar.
+  const pdfSavedPageRef = useRef(pdfSavedPage);
+  pdfSavedPageRef.current = pdfSavedPage;
+  const epubLatestCfiRef = useRef<string | null>(null);
+  const pdfSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const epubSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Verdadeiro se um link explícito de página/capítulo ([[arquivo#p42]]/
+  // [[arquivo#cap3]]) já mira este arquivo — checa TANTO o state
+  // (activeViewerAnchor, correto a partir do 2º render) QUANTO o ref
+  // (pendingViewerAnchorRef, correto IMEDIATAMENTE, antes do efeito de
+  // promoção abaixo rodar) — link explícito sempre tem prioridade sobre a
+  // posição salva automaticamente, sem essa checagem dupla um clique de link
+  // "perderia a corrida" pro efeito de carregamento da posição salva no
+  // mesmo commit.
+  function hasExplicitAnchor(kind: "page" | "chapter"): boolean {
+    if (activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === kind) return true;
+    const pending = pendingViewerAnchorRef.current;
+    return !!pending && pending.filename === filename && pending.kind === kind;
+  }
+
+  // Salva a última posição conhecida ao fechar/trocar de arquivo — cobre o
+  // caso do PDF (só sabemos o campo de página, não a rolagem de verdade) e
+  // garante que o CFI mais recente do EPUB seja persistido mesmo sem esperar
+  // o debounce de 900ms terminar. Captura a identidade do arquivo que está
+  // FECHANDO via closure normal do efeito (correta por construção — é
+  // exatamente o valor de quando o efeito foi configurado). Declarado ANTES
+  // do efeito de carregamento abaixo de propósito: React roda limpeza+setup
+  // de cada efeito na ordem de declaração dos hooks — se o efeito de
+  // carregamento (que zera epubLatestCfiRef pro arquivo NOVO) rodasse
+  // primeiro, a limpeza deste aqui leria o ref já zerado em vez do CFI de
+  // verdade do arquivo que está fechando.
+  useEffect(() => {
+    const closingIdentity = filename ? { filename, isCalibreBook, calibreId, calibreFormat } : undefined;
+    const closingViewerKind = viewerKind;
+    return () => {
+      if (!closingIdentity) return;
+      // `pdfSavedPageRef.current !== undefined` — só grava se a busca da
+      // posição salva já resolveu. Sem essa checagem, fechar ANTES do GET
+      // responder grava pdfPageInputRef.current no valor padrão (1) por
+      // cima de uma posição real já salva — bug real encontrado ao testar
+      // retomada de leitura ao vivo (React Strict Mode expôs de forma
+      // determinística em dev, rodando a limpeza deste efeito uma vez a
+      // mais, synchronous, logo na montagem — mas a mesma corrida existe em
+      // produção pra quem fechar o painel rápido o bastante). Mesmo
+      // espírito da checagem `epubLatestCfiRef.current` abaixo (que já era
+      // segura porque começa em `null`, não num número que parece válido).
+      if (closingViewerKind === "pdf" && pdfSavedPageRef.current !== undefined) {
+        savePdfPosition(closingIdentity, pdfPageInputRef.current);
+      }
+      if (closingViewerKind === "epub" && epubLatestCfiRef.current) saveEpubPosition(closingIdentity, epubLatestCfiRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filename]);
+
+  // Busca a posição de leitura salva pro arquivo atual — pulada inteiramente
+  // quando há um link explícito pro mesmo arquivo (evita a viagem de rede à
+  // toa, já que o link explícito ganha de qualquer forma). Precisa rodar
+  // ANTES do efeito de promoção de pendingViewerAnchorRef (mais abaixo,
+  // "roda quando filename muda") pra ler o ref antes dele ser zerado.
+  useEffect(() => {
+    let cancelled = false;
+    setPdfSavedPage(undefined);
+    setEpubSavedCfi(undefined);
+    // Sem isso, fechar o painel ANTES do primeiro "relocated" de um EPUB
+    // recém-aberto (ex: troca rápida de nota) faria o efeito de flush acima
+    // salvar o CFI do livro ANTERIOR sob a identidade do livro novo — seguro
+    // zerar aqui porque o efeito de flush (que precisa do valor antigo) já
+    // rodou sua limpeza antes deste efeito rodar (ver comentário acima).
+    epubLatestCfiRef.current = null;
+    if (!filename || !viewerKind) return () => {};
+
+    if (viewerKind === "pdf") {
+      if (hasExplicitAnchor("page")) {
+        setPdfSavedPage(null);
+        return () => {};
+      }
+      // `cache: "no-store"` necessário — sem isso, duas montagens em
+      // sequência rápida do mesmo painel (comum no dev com Strict Mode, mas
+      // não exclusivo disso) podem servir uma resposta HTTP cacheada
+      // ANTIGA pra segunda leitura em vez de ir de novo à rede, mesmo com a
+      // posição salva já tendo mudado nesse meio-tempo — bug real
+      // encontrado ao testar ao vivo: reabrir depois de navegar voltava
+      // pra página 1 mesmo com a posição certa já persistida no banco.
+      const req = isCalibreBook
+        ? fetch(`/api/calibre/reading-position?calibreId=${calibreId}&format=${calibreFormat}`, { cache: "no-store" })
+        : vaultFetch(`/api/note/reading-position?filename=${encodeURIComponent(filename)}`, { cache: "no-store" });
+      req
+        .then((r) => r.json())
+        .then((data) => {
+          if (cancelled) return;
+          const page = typeof data.page === "number" ? data.page : null;
+          setPdfSavedPage(page);
+          // Sem isso, o CAMPO de página (pdfPageInput) continuava mostrando
+          // "1" mesmo com a posição salva corretamente carregada — bug real
+          // encontrado ao testar ao vivo com o visualizador antigo:
+          // initialPage usava pdfSavedPage certinho, mas pdfPageInput (o que
+          // aparece no cabeçalho E o que o efeito de flush salva ao fechar)
+          // nunca era atualizado, então fechar sem tocar no campo
+          // sobrescrevia a posição salva de volta pra 1.
+          if (page !== null) setPdfPageInput(page);
+        })
+        .catch(() => {
+          if (!cancelled) setPdfSavedPage(null);
+        });
+    }
+
+    if (viewerKind === "epub") {
+      if (hasExplicitAnchor("chapter")) {
+        setEpubSavedCfi(null);
+        return () => {};
+      }
+      // `cache: "no-store"` necessário — sem isso, duas montagens em
+      // sequência rápida do mesmo painel (comum no dev com Strict Mode, mas
+      // não exclusivo disso) podem servir uma resposta HTTP cacheada
+      // ANTIGA pra segunda leitura em vez de ir de novo à rede, mesmo com a
+      // posição salva já tendo mudado nesse meio-tempo — bug real
+      // encontrado ao testar ao vivo: reabrir depois de navegar voltava
+      // pra página 1 mesmo com a posição certa já persistida no banco.
+      const req = isCalibreBook
+        ? fetch(`/api/calibre/reading-position?calibreId=${calibreId}&format=${calibreFormat}`, { cache: "no-store" })
+        : vaultFetch(`/api/note/reading-position?filename=${encodeURIComponent(filename)}`, { cache: "no-store" });
+      req
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled) setEpubSavedCfi(typeof data.cfi === "string" ? data.cfi : null);
+        })
+        .catch(() => {
+          if (!cancelled) setEpubSavedCfi(null);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filename, viewerKind, isCalibreBook, calibreId, calibreFormat, vaultFetch]);
+
+  // Identidade explícita como PARÂMETRO (não lida de um ref mutável) de
+  // propósito: um ref atualizado durante o RENDER já reflete o arquivo NOVO
+  // por volta da hora que a limpeza de um efeito anterior roda (React sempre
+  // renderiza o próximo commit antes de rodar a limpeza do efeito anterior)
+  // — usar um ref mutável ali salvaria a posição do arquivo ERRADO. Cada
+  // chamador captura a identidade certa via closure no momento certo
+  // (agendamento ou configuração do efeito acima), nunca por leitura tardia
+  // de estado mutável.
+  function savePdfPosition(
+    id: { filename: string; isCalibreBook: boolean; calibreId: number | null; calibreFormat: string | null },
+    page: number
+  ) {
+    if (id.isCalibreBook) {
+      fetch("/api/calibre/reading-position", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ calibreId: id.calibreId, format: id.calibreFormat, page }),
+      });
+    } else {
+      vaultFetch("/api/note/reading-position", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: id.filename, page }),
+      });
+    }
+  }
+  function schedulePdfPositionSave(page: number) {
+    if (!filename) return;
+    const id = { filename, isCalibreBook, calibreId, calibreFormat };
+    if (pdfSaveDebounceRef.current) clearTimeout(pdfSaveDebounceRef.current);
+    pdfSaveDebounceRef.current = setTimeout(() => savePdfPosition(id, page), 900);
+  }
+  // Único ponto que recebe página real do PDF — vinda tanto do rastreamento
+  // de scroll (PdfViewer.tsx, já debounced ~400ms lá dentro) quanto de
+  // navegação direta (campo digitado, setas, link explícito). Mesmo papel
+  // de handleEpubCfiChange abaixo: mantém pdfPageInput sempre correspondente
+  // ao que o visualizador está de fato mostrando, e agenda o salvamento.
+  function handlePdfPageChange(page: number) {
+    setPdfPageInput(page);
+    schedulePdfPositionSave(page);
+  }
+
+  function saveEpubPosition(
+    id: { filename: string; isCalibreBook: boolean; calibreId: number | null; calibreFormat: string | null },
+    cfi: string
+  ) {
+    if (id.isCalibreBook) {
+      fetch("/api/calibre/reading-position", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ calibreId: id.calibreId, format: id.calibreFormat, cfi }),
+      });
+    } else {
+      vaultFetch("/api/note/reading-position", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: id.filename, cfi }),
+      });
+    }
+  }
+  function handleEpubCfiChange(cfi: string) {
+    epubLatestCfiRef.current = cfi;
+    if (!filename) return;
+    const id = { filename, isCalibreBook, calibreId, calibreFormat };
+    if (epubSaveDebounceRef.current) clearTimeout(epubSaveDebounceRef.current);
+    epubSaveDebounceRef.current = setTimeout(() => saveEpubPosition(id, cfi), 900);
+  }
+
+  // Sumário do EPUB (painel lateral, EpubTocDrawer.tsx) — sumário/capítulo
+  // atual resetados na troca de arquivo, mesmo padrão de epubPosition acima.
+  const [tocOpen, setTocOpen] = useState(false);
+  const [epubToc, setEpubToc] = useState<TocEntry[]>([]);
+  const [epubCurrentSpineIndex, setEpubCurrentSpineIndex] = useState<number | null>(null);
+  useEffect(() => {
+    setEpubToc([]);
+    setEpubCurrentSpineIndex(null);
+    setTocOpen(false);
+  }, [filename]);
 
   function handleCopyPositionLink() {
     if (viewerKind === "pdf" && filename) {
@@ -942,6 +1206,21 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     pendingViewerAnchorRef.current = null;
     setActiveViewerAnchor(pending);
   }, [filename]);
+
+  // Link explícito [[arquivo#p42]] pro MESMO arquivo já aberto — navega via
+  // goToPage (PdfViewer.tsx), sem remontar o visualizador. Mesma ideia do
+  // efeito de initialChapter do EPUB logo abaixo, só que aqui precisa ser um
+  // efeito reagindo a activeViewerAnchor (em vez de uma chamada direta no
+  // clique) porque o caminho até aqui é mais indireto: o clique só grava em
+  // pendingViewerAnchorRef, e é o efeito acima que promove pra
+  // activeViewerAnchor — não há um único ponto de clique pra pendurar uma
+  // chamada imperativa.
+  useEffect(() => {
+    if (!hasExplicitAnchor("page")) return;
+    const target = parseInt(activeViewerAnchor!.value, 10);
+    if (target) pdfViewerRef.current?.goToPage(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeViewerAnchor]);
 
   useEffect(() => {
     if (!filename || isCalibreBook) {
@@ -1814,14 +2093,55 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   </span>
                 )}
 
+                {!focusMode && isCalibreBook && calibreId !== null && (
+                  <button
+                    onClick={() => onToggleCalibreFavorite(calibreId)}
+                    className="toolbar-link"
+                    title={calibreFavoriteIds.has(calibreId) ? "Remover dos favoritos" : "Marcar como favorito"}
+                    style={{ background: "transparent", border: "none", padding: "0.2rem", cursor: "pointer", display: "flex", alignItems: "center", flexShrink: 0 }}
+                  >
+                    <StarIcon filled={calibreFavoriteIds.has(calibreId)} />
+                  </button>
+                )}
+
                 {viewerKind === "pdf" && (
-                  <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: "0.15rem", flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                    <button
+                      onClick={() => pdfViewerRef.current?.goToPage(pdfPageInput - 1)}
+                      disabled={pdfPageInput <= 1}
+                      className="toolbar-link"
+                      title="Página anterior"
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        cursor: pdfPageInput <= 1 ? "default" : "pointer",
+                        padding: "0.2rem",
+                        display: "flex",
+                        alignItems: "center",
+                        color: pdfPageInput <= 1 ? "var(--panel-border)" : "var(--text-muted)",
+                      }}
+                    >
+                      ‹
+                    </button>
                     Pág.
                     <input
                       type="number"
                       min={1}
+                      max={pdfNumPages ?? undefined}
                       value={pdfPageInput}
+                      // Só atualiza o valor exibido — a navegação de verdade
+                      // acontece em onBlur/Enter (goToPage), não a cada
+                      // dígito. schedulePdfPositionSave só é chamado a
+                      // partir de handlePdfPageChange (navegação real),
+                      // nunca direto daqui.
                       onChange={(e) => setPdfPageInput(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      onBlur={() => pdfViewerRef.current?.goToPage(pdfPageInput)}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        pdfViewerRef.current?.goToPage(pdfPageInput);
+                        (e.target as HTMLInputElement).blur();
+                      }}
                       style={{
                         width: "3.5em",
                         padding: "0.15rem 0.35rem",
@@ -1831,10 +2151,136 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                         color: "var(--foreground)",
                       }}
                     />
+                    {pdfNumPages != null && <span>/ {pdfNumPages}</span>}
+                    <button
+                      onClick={() => pdfViewerRef.current?.goToPage(pdfPageInput + 1)}
+                      disabled={pdfNumPages != null && pdfPageInput >= pdfNumPages}
+                      className="toolbar-link"
+                      title="Próxima página"
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        cursor: pdfNumPages != null && pdfPageInput >= pdfNumPages ? "default" : "pointer",
+                        padding: "0.2rem",
+                        display: "flex",
+                        alignItems: "center",
+                        color: pdfNumPages != null && pdfPageInput >= pdfNumPages ? "var(--panel-border)" : "var(--text-muted)",
+                      }}
+                    >
+                      ›
+                    </button>
+                  </span>
+                )}
+                {viewerKind === "pdf" && (
+                  <span style={{ display: "flex", alignItems: "center", gap: "0.15rem", flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                    <button
+                      onClick={() => pdfViewerRef.current?.zoomOut()}
+                      disabled={pdfZoomPercent <= PDF_ZOOM_LEVELS[0]}
+                      className="toolbar-link"
+                      title="Diminuir zoom"
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        cursor: pdfZoomPercent <= PDF_ZOOM_LEVELS[0] ? "default" : "pointer",
+                        padding: "0.2rem",
+                        display: "flex",
+                        alignItems: "center",
+                        color: pdfZoomPercent <= PDF_ZOOM_LEVELS[0] ? "var(--panel-border)" : "var(--text-muted)",
+                      }}
+                    >
+                      −
+                    </button>
+                    {pdfZoomEditing ? (
+                      <input
+                        type="number"
+                        autoFocus
+                        value={pdfZoomDraft}
+                        onChange={(e) => setPdfZoomDraft(e.target.value)}
+                        onFocus={(e) => e.target.select()}
+                        onBlur={() => {
+                          const parsed = parseInt(pdfZoomDraft, 10);
+                          if (parsed) pdfViewerRef.current?.setZoomPercent(parsed);
+                          setPdfZoomEditing(false);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            (e.target as HTMLInputElement).blur();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setPdfZoomEditing(false);
+                          }
+                        }}
+                        style={{
+                          width: "3.2em",
+                          padding: "0.15rem 0.35rem",
+                          borderRadius: "4px",
+                          border: "1px solid var(--panel-border)",
+                          background: "transparent",
+                          color: "var(--foreground)",
+                        }}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setPdfZoomDraft(String(pdfZoomPercent));
+                          setPdfZoomEditing(true);
+                        }}
+                        className="toolbar-link"
+                        title="Digitar zoom"
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          padding: "0.15rem 0.2rem",
+                          cursor: "pointer",
+                          color: "var(--text-muted)",
+                          minWidth: "3em",
+                          textAlign: "center",
+                        }}
+                      >
+                        {pdfZoomPercent}%
+                      </button>
+                    )}
+                    <button
+                      onClick={() => pdfViewerRef.current?.zoomIn()}
+                      disabled={pdfZoomPercent >= PDF_ZOOM_LEVELS[PDF_ZOOM_LEVELS.length - 1]}
+                      className="toolbar-link"
+                      title="Aumentar zoom"
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        cursor: pdfZoomPercent >= PDF_ZOOM_LEVELS[PDF_ZOOM_LEVELS.length - 1] ? "default" : "pointer",
+                        padding: "0.2rem",
+                        display: "flex",
+                        alignItems: "center",
+                        color: pdfZoomPercent >= PDF_ZOOM_LEVELS[PDF_ZOOM_LEVELS.length - 1] ? "var(--panel-border)" : "var(--text-muted)",
+                      }}
+                    >
+                      +
+                    </button>
                   </span>
                 )}
                 {viewerKind === "epub" && epubPosition && (
                   <span style={{ flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>{epubPosition}</span>
+                )}
+                {viewerKind === "epub" && (
+                  <button
+                    onClick={() => setTocOpen(true)}
+                    className="toolbar-link"
+                    title="Sumário"
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      padding: "0.3rem",
+                      display: "flex",
+                      alignItems: "center",
+                      color: "var(--text-muted)",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <TocIcon />
+                  </button>
                 )}
 
                 {!focusMode && isCalibreBook && (
@@ -2141,40 +2587,96 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           {viewerKind && filename && (
             <div style={{ maxWidth: READING_MAX_WIDTH, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
               {viewerKind === "pdf" && (
-                <PdfNativeViewer
-                  key={activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page" ? activeViewerAnchor.value : "default"}
-                  filename={filename}
-                  initialPage={
-                    activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "page"
-                      ? parseInt(activeViewerAnchor.value, 10) || undefined
-                      : undefined
-                  }
-                  sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
-                />
+                hasExplicitAnchor("page") === false && pdfSavedPage === undefined ? (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
+                    Carregando…
+                  </div>
+                ) : pdfViewerError ? (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--danger, #c0392b)", padding: "1rem", textAlign: "center" }}>
+                    {pdfViewerError}
+                  </div>
+                ) : (
+                  // Sem `key` — ao contrário do antigo PdfNativeViewer, este
+                  // visualizador nunca precisa remontar pra navegar: goToPage
+                  // (ref) e o efeito de link explícito acima cobrem os casos
+                  // que antes dependiam de trocar a key pra forçar reabrir o
+                  // iframe numa página nova.
+                  <PdfViewer
+                    ref={pdfViewerRef}
+                    filename={filename}
+                    theme={theme}
+                    initialPage={hasExplicitAnchor("page") ? parseInt(activeViewerAnchor!.value, 10) || undefined : (pdfSavedPage ?? undefined)}
+                    sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
+                    onPageChange={handlePdfPageChange}
+                    onDocumentLoaded={setPdfNumPages}
+                    onZoomChange={setPdfZoomPercent}
+                    onError={setPdfViewerError}
+                    onOpenTranslate={openTranslatePanel}
+                    onSelectionChange={scheduleTranslateUpdate}
+                  />
+                )
               )}
+              {/* Mesmo gate de "Carregando…" do PDF acima, mas aqui é o que faz a
+                  retomada de posição funcionar de verdade (não só uma questão de
+                  UX): o efeito de montagem do EpubViewer fecha sobre o `initialCfi`
+                  que recebeu no primeiro render e só chama rendition.display() com
+                  esse valor DEPOIS de `book.ready` resolver (parse do arquivo
+                  inteiro) — normalmente mais lento que este GET local. Sem esse
+                  gate, o EpubViewer montava synchronously com initialCfi=undefined,
+                  e mesmo o efeito de fallback dele (que reage a initialCfi mudar
+                  depois) não bastava: seu display(cfi) tende a rodar ANTES de
+                  book.ready resolver, e o display(undefined) do efeito de
+                  montagem — que roda DEPOIS de book.ready — vencia por último e
+                  sobrescrevia de volta pro início do livro. Montar o EpubViewer só
+                  depois de epubSavedCfi resolvido garante que ele já nasce com o
+                  valor final, sem essa corrida. */}
               {viewerKind === "epub" && (
-                <EpubViewer
-                  ref={epubViewerRef}
-                  filename={filename}
-                  theme={theme}
-                  fontSize={fontSize}
-                  noteFont={noteFont}
-                  initialChapter={
-                    activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "chapter"
-                      ? parseInt(activeViewerAnchor.value, 10) || undefined
-                      : undefined
-                  }
-                  onMarkerClick={handleEpubMarkerClick}
-                  sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
-                  linkLabel={isCalibreBook ? calibreBook?.title : undefined}
-                  calibreId={isCalibreBook ? calibreId ?? undefined : undefined}
-                  onPositionChange={setEpubPosition}
-                  onContentInteraction={() => setCloseCommentPickerTrigger((t) => t + 1)}
-                  onOpenTranslate={openTranslatePanel}
-                  onSelectionChange={scheduleTranslateUpdate}
-                />
+                hasExplicitAnchor("chapter") === false && epubSavedCfi === undefined ? (
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
+                    Carregando…
+                  </div>
+                ) : (
+                  <EpubViewer
+                    ref={epubViewerRef}
+                    filename={filename}
+                    theme={theme}
+                    fontSize={fontSize}
+                    noteFont={noteFont}
+                    initialChapter={
+                      activeViewerAnchor?.filename === filename && activeViewerAnchor.kind === "chapter"
+                        ? parseInt(activeViewerAnchor.value, 10) || undefined
+                        : undefined
+                    }
+                    initialCfi={!hasExplicitAnchor("chapter") ? (epubSavedCfi ?? undefined) : undefined}
+                    onMarkerClick={handleEpubMarkerClick}
+                    sourceUrl={isCalibreBook ? `/api/calibre/file/${calibreId}?format=${calibreFormat}` : undefined}
+                    linkLabel={isCalibreBook ? calibreBook?.title : undefined}
+                    calibreId={isCalibreBook ? calibreId ?? undefined : undefined}
+                    onPositionChange={setEpubPosition}
+                    onCfiChange={handleEpubCfiChange}
+                    onChapterIndexChange={setEpubCurrentSpineIndex}
+                    onTocLoaded={setEpubToc}
+                    onContentInteraction={() => setCloseCommentPickerTrigger((t) => t + 1)}
+                    onOpenTranslate={openTranslatePanel}
+                    onSelectionChange={scheduleTranslateUpdate}
+                  />
+                )
               )}
             </div>
+          )}
+
+          {viewerKind === "epub" && (
+            <EpubTocDrawer
+              open={tocOpen}
+              toc={epubToc}
+              currentSpineIndex={epubCurrentSpineIndex}
+              resolveSpineIndex={(href) => epubViewerRef.current?.getSpineIndexForHref(href) ?? null}
+              onNavigate={(href) => {
+                epubViewerRef.current?.goToCfi(href);
+                setTocOpen(false);
+              }}
+              onClose={() => setTocOpen(false)}
+            />
           )}
 
           {!viewerKind && filename && (

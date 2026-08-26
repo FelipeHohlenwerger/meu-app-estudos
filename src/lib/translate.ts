@@ -1,7 +1,6 @@
 // Chamada client-side compartilhada por NotePanel.tsx (.md) e EpubViewer.tsx
 // pra tradução — arquivo separado de aiActions.ts de propósito: fala com o
-// endpoint gratuito do Google Tradutor (ver translateServer.ts), não com o
-// Gemini.
+// MTranServer self-hosted (ver translateServer.ts), não com o Gemini.
 export async function requestTranslation(
   texto: string
 ): Promise<{ translatedText: string; detectedSourceLanguage?: string }> {

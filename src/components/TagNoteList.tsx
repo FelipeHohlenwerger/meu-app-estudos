@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import NoteCard, { type LibraryNote } from "@/components/NoteCard";
+import FavoriteCard from "@/components/FavoriteCard";
+import type { FavoriteItem } from "@/lib/favoriteItems";
+import type { CalibreBook } from "@/lib/calibreLibrary";
 import { matchesTypeFilter, CONTENT_TYPE_FILTER_OPTIONS, type ContentTypeFilter } from "@/lib/noteStatus";
 import { formatTagLabel } from "@/lib/tagTree";
 
@@ -13,6 +16,12 @@ type Props = {
   // recentList) continuam sem filtro, como antes. Mesmo padrão opt-in que
   // GroupedNoteList.tsx já usa pra Progresso.
   showTypeFilter?: boolean;
+  // Livros do Calibre favoritados — só a lista de Favoritos passa algo aqui
+  // (ver page.tsx); tagList/recentList continuam sem, comportamento
+  // inalterado. Sempre bate "Todos"/"Livros" no filtro de tipo, nunca
+  // "Artigos"/"Notas" — regra trivial aplicada só a este sublista, sem
+  // mexer em matchesTypeFilter (usado em vários outros lugares pra notas).
+  calibreItems?: FavoriteItem[];
   onOpenNote: (filename: string) => void;
   onRenameNote: (filename: string, newTitle: string, onSettled: () => void) => void;
   onDeleteNote: (filename: string) => void;
@@ -23,6 +32,8 @@ type Props = {
   // recência. Nenhum outro caller passa isso, então nada muda pra eles.
   metaForNote?: (note: LibraryNote) => string;
   onToggleFavorite: (filename: string) => void;
+  onOpenCalibreBook?: (book: CalibreBook) => void;
+  onToggleCalibreFavorite?: (bookId: number) => void;
 };
 
 export default function TagNoteList({
@@ -30,17 +41,31 @@ export default function TagNoteList({
   notes,
   heading: headingOverride,
   showTypeFilter,
+  calibreItems,
   onOpenNote,
   onRenameNote,
   onDeleteNote,
   onDeleteMultiple,
   metaForNote,
   onToggleFavorite,
+  onOpenCalibreBook,
+  onToggleCalibreFavorite,
 }: Props) {
   const heading = headingOverride ?? (tag ? formatTagLabel(tag) : "Sem categoria");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [typeFilter, setTypeFilter] = useState<ContentTypeFilter>("all");
   const filteredNotes = showTypeFilter ? notes.filter((n) => matchesTypeFilter(n, typeFilter)) : notes;
+  // Livro do Calibre sempre é "book" — bate com "all"/"book", nunca com
+  // "article"/"note". Renderizado à parte de filteredNotes/NoteCard abaixo
+  // (não unificado num "combinedItems") porque seleção múltipla/exclusão em
+  // lote só existe pra nota — um livro do Calibre é só leitura, nunca
+  // aparece selecionável aqui, então não há por que fingir suportar isso em
+  // FavoriteCard.
+  const filteredCalibreItems = showTypeFilter
+    ? typeFilter === "all" || typeFilter === "book"
+      ? calibreItems ?? []
+      : []
+    : calibreItems ?? [];
 
   function toggleSelect(filename: string) {
     setSelected((prev) => {
@@ -65,6 +90,8 @@ export default function TagNoteList({
       <h1 style={{ fontFamily: "var(--font-fraunces)", fontSize: "2em", margin: 0 }}>{heading}</h1>
       <p style={{ color: "var(--text-muted)", marginTop: "0.4rem", marginBottom: "1rem" }}>
         {filteredNotes.length} {filteredNotes.length === 1 ? "nota" : "notas"}
+        {filteredCalibreItems.length > 0 &&
+          `, ${filteredCalibreItems.length} ${filteredCalibreItems.length === 1 ? "livro" : "livros"} (Calibre)`}
       </p>
 
       {showTypeFilter && (
@@ -152,11 +179,26 @@ export default function TagNoteList({
         </div>
       )}
 
-      {showTypeFilter && filteredNotes.length === 0 && (
+      {showTypeFilter && filteredNotes.length === 0 && filteredCalibreItems.length === 0 && (
         <p style={{ color: "var(--text-muted)", marginTop: "1rem" }}>Nenhuma nota encontrada.</p>
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, 220px)", gap: "1rem" }}>
+        {filteredCalibreItems.length > 0 &&
+          onOpenCalibreBook &&
+          onToggleCalibreFavorite &&
+          filteredCalibreItems.map((item) => (
+            <FavoriteCard
+              key={item.kind === "calibre" ? `calibre:${item.book.id}` : item.note.filename}
+              item={item}
+              onOpenNote={onOpenNote}
+              onRenameNote={onRenameNote}
+              onDeleteNote={onDeleteNote}
+              onToggleFavorite={onToggleFavorite}
+              onOpenCalibreBook={onOpenCalibreBook}
+              onToggleCalibreFavorite={onToggleCalibreFavorite}
+            />
+          ))}
         {filteredNotes.map((note) => (
           <NoteCard
             key={note.filename}

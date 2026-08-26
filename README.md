@@ -21,7 +21,7 @@ O projeto roda tanto como aplicação web local (`npm run dev`, acessada pelo na
 - **Leitor de PDF e EPUB** nativo, com grifos/comentários funcionando sobre o conteúdo importado.
 - **Importação de artigos da web** (convertidos para Markdown editável) e anexos de imagem.
 - **Chat com IA e ações de IA** (resumir, explicar, gerar perguntas) usando a API do Gemini.
-- **Tradução automática** de trechos selecionados, num painel lateral que acompanha a seleção enquanto aberto (detecção de idioma automática, resultado em português) — sem configuração, sem chave de API.
+- **Tradução automática** de trechos selecionados, num painel lateral que acompanha a seleção enquanto aberto (detecção de idioma automática, resultado em português) — via [MTranServer](https://github.com/xxnuo/MTranServer) self-hosted (ver seção abaixo).
 - **Modo desktop nativo** (Linux/AppImage) além do modo web, sem duplicação de código.
 
 ## Pré-requisitos
@@ -111,6 +111,19 @@ As funcionalidades de IA (chat, resumir, explicar, gerar perguntas) precisam de 
 2. Cole em `GEMINI_API_KEY` no seu `.env.local` (baseado no `.env.example`).
 
 Sem essa chave, o resto do app funciona normalmente — só as funcionalidades de IA ficam indisponíveis.
+
+## Servidor de tradução (MTranServer)
+
+A funcionalidade "Traduzir" (menu de seleção de texto) depende de um servidor [MTranServer](https://github.com/xxnuo/MTranServer) — tradução offline, self-hosted, leve o suficiente pra rodar num notebook comum (só CPU, ~1GB de RAM):
+
+1. Em qualquer máquina da sua rede local (não precisa ser o mesmo computador que roda o `study-app`), suba o container:
+   ```bash
+   docker run -d --name mtranserver -p 8989:8989 -e MT_API_TOKEN=<seu-token> xxnuo/mtranserver:latest
+   ```
+   Configure o par de idiomas inglês↔português no primeiro acesso (ver documentação do próprio MTranServer).
+2. No `.env.local` do `study-app` (baseado no `.env.example`), aponte `MTRANSERVER_URL` pro endereço de rede dessa máquina (ex: `http://192.168.0.42:8989`) e, se usou `MT_API_TOKEN`, replique o mesmo valor em `MTRANSERVER_API_TOKEN`.
+
+Sem essas variáveis configuradas — ou se a máquina do MTranServer estiver desligada/fora da rede — o resto do app funciona normalmente; só a tradução mostra um erro claro no painel lateral.
 
 ## Estrutura do projeto
 

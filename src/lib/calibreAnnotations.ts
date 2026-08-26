@@ -40,6 +40,31 @@ function getDb(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_calibre_note_links_book ON calibre_book_note_links(calibre_book_id);
     CREATE INDEX IF NOT EXISTS idx_calibre_note_links_note ON calibre_book_note_links(vault_id, filename);
+
+    -- Favorito de livro do Calibre — GLOBAL pelo mesmo motivo das tabelas
+    -- acima: o livro em si não pertence a nenhum vault, então "favoritado"
+    -- não pode ser um conceito por vault (diferente de notes.is_favorite,
+    -- que é uma coluna por vault porque a nota em si é de um vault).
+    CREATE TABLE IF NOT EXISTS calibre_book_favorites (
+      calibre_book_id INTEGER PRIMARY KEY,
+      favorited_at INTEGER NOT NULL
+    );
+
+    -- Posição de leitura salva automaticamente por livro do Calibre — mesma
+    -- coisa que reading_positions (vaultIndex.ts), GLOBAL pelo mesmo motivo
+    -- das tabelas acima. Chaveada por (calibre_book_id, format), NÃO só
+    -- calibre_book_id: um livro com mais de um formato disponível pode ser
+    -- reaberto em qualquer um deles (ver seletor de formato em "Mais
+    -- opções", NotePanel.tsx) — página de PDF e CFI de EPUB do "mesmo"
+    -- livro não têm relação nenhuma entre si.
+    CREATE TABLE IF NOT EXISTS calibre_reading_positions (
+      calibre_book_id INTEGER NOT NULL,
+      format TEXT NOT NULL,
+      page INTEGER,
+      cfi TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (calibre_book_id, format)
+    );
   `);
   db = conn;
   return conn;
@@ -134,4 +159,44 @@ export function unlinkNoteFromBook(calibreBookId: number, vaultId: string, filen
   getDb()
     .prepare("DELETE FROM calibre_book_note_links WHERE calibre_book_id = ? AND vault_id = ? AND filename = ?")
     .run(calibreBookId, vaultId, filename);
+}
+
+// Ids dos livros favoritados, mais recente primeiro — o client já tem
+// calibreBooks completo carregado à parte (GET /api/calibre/books), então
+// aqui basta devolver os ids pra montar o Set local.
+export function getFavoriteCalibreBookIds(): number[] {
+  const rows = getDb()
+    .prepare("SELECT calibre_book_id FROM calibre_book_favorites ORDER BY favorited_at DESC")
+    .all() as { calibre_book_id: number }[];
+  return rows.map((r) => r.calibre_book_id);
+}
+
+export function setCalibreBookFavorite(calibreBookId: number, isFavorite: boolean): void {
+  const conn = getDb();
+  if (isFavorite) {
+    conn.prepare("INSERT OR IGNORE INTO calibre_book_favorites (calibre_book_id, favorited_at) VALUES (?, ?)").run(calibreBookId, Date.now());
+  } else {
+    conn.prepare("DELETE FROM calibre_book_favorites WHERE calibre_book_id = ?").run(calibreBookId);
+  }
+}
+
+// Mesma forma de ReadingPosition (vaultIndex.ts) — duplicada aqui, não
+// importada de lá, pra não criar um import circular (vaultIndex.ts é quem
+// já importa DESTE arquivo, nunca o contrário).
+export type CalibreReadingPosition = { page: number | null; cfi: string | null };
+
+export function getCalibreReadingPosition(calibreBookId: number, format: string): CalibreReadingPosition | null {
+  const row = getDb()
+    .prepare("SELECT page, cfi FROM calibre_reading_positions WHERE calibre_book_id = ? AND format = ?")
+    .get(calibreBookId, format) as { page: number | null; cfi: string | null } | undefined;
+  return row ?? null;
+}
+
+export function setCalibreReadingPosition(calibreBookId: number, format: string, data: { page?: number; cfi?: string }): void {
+  getDb()
+    .prepare(
+      `INSERT INTO calibre_reading_positions (calibre_book_id, format, page, cfi, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(calibre_book_id, format) DO UPDATE SET page = excluded.page, cfi = excluded.cfi, updated_at = excluded.updated_at`
+    )
+    .run(calibreBookId, format, data.page ?? null, data.cfi ?? null, Date.now());
 }
