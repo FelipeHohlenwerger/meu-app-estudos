@@ -287,7 +287,18 @@ type NotePanelProps = {
   closable?: boolean;
   onClose?: () => void;
   onFocus: () => void;
+  // Disparado por toda navegação DENTRO do painel pra outro arquivo — clique
+  // em wiki-link/backlink/link de página-capítulo-bloco, criação de nota a
+  // partir de link quebrado, troca de formato de um livro Calibre. É uma
+  // navegação de verdade (o app-shell reflete isso na URL como um novo passo
+  // de histórico) — distinto de onRenamed abaixo, que é só sincronização de
+  // identidade (mesmo item, nome novo).
   onFilenameChange: (next: string | null) => void;
+  // Disparado só pelo rename via título editado no topo do painel (ver
+  // renameActiveNote) — o item continua sendo logicamente o mesmo, só o nome
+  // mudou; o app-shell trata isso como sincronização de URL, não navegação
+  // (não deve empilhar histórico, senão "Voltar" ressuscitaria o nome antigo).
+  onRenamed?: (next: string) => void;
   onLibraryChanged: () => void;
   onTagsChanged: (filename: string, tags: string[]) => void;
   onFavoriteChanged: (filename: string, isFavorite: boolean) => void;
@@ -342,6 +353,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onClose,
     onFocus,
     onFilenameChange,
+    onRenamed,
     onLibraryChanged,
     onTagsChanged,
     onFontSizeChange,
@@ -945,7 +957,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
     const newFilename: string = data.filename;
     skipNextAutosaveRef.current = true;
-    onFilenameChange(newFilename);
+    if (onRenamed) onRenamed(newFilename);
+    else onFilenameChange(newFilename);
     onLibraryChanged();
     editorViewRef.current?.focus();
   }

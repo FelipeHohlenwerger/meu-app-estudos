@@ -23,7 +23,21 @@ function getReadingColors() {
   const foreground = styles.getPropertyValue("--foreground").trim() || "#e8ddc9";
   const background = styles.getPropertyValue("--background").trim() || "#1c1a17";
   const panelHover = styles.getPropertyValue("--panel-hover").trim() || "#2f2a23";
-  return { foreground, background, panelHover };
+  const accent = styles.getPropertyValue("--accent").trim() || "#d4af6a";
+  return { foreground, background, panelHover, accent };
+}
+
+// "#rrggbb" -> {r,g,b} — usado só pra montar o rgba() do destaque de seleção
+// abaixo (ver applyReadingTheme); --accent é sempre hex sólido neste app
+// (colors.ts/globals.css), nunca rgba/nome de cor, então esse parse simples
+// é seguro.
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const clean = hex.replace("#", "");
+  if (clean.length !== 6) return null;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b) ? null : { r, g, b };
 }
 
 // cssVarForFont devolve "var(--font-lora)" — útil como valor CSS no
@@ -37,9 +51,20 @@ function getReadingFontFamily(fontId: NoteFontId): string {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number) {
-  const { foreground, background, panelHover } = getReadingColors();
+function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number, theme: "dark" | "light") {
+  const { foreground, background, accent } = getReadingColors();
   const fontFamily = getReadingFontFamily(fontId);
+  // Destaque de seleção de texto — antes usava --panel-hover (mesmo par de
+  // cores do fundo do editor CodeMirror), mas panelHover é próximo demais
+  // do --background do tema escuro (#2f2a23 vs #1c1a17): o RETÂNGULO da
+  // seleção quase não se distingue do resto da página, mesmo com o texto em
+  // si legível. Troca pro --accent do tema (já pensado pra se destacar
+  // contra o fundo): sólido no tema claro (a versão semitransparente não
+  // dava contraste suficiente testando visualmente), a ~55% de opacidade no
+  // escuro (sólido ali ficaria forte demais, apagando o próprio texto).
+  const accentRgb = hexToRgb(accent);
+  const selectionBackground =
+    theme === "light" ? accent : accentRgb ? `rgba(${accentRgb.r}, ${accentRgb.g}, ${accentRgb.b}, 0.55)` : accent;
   rendition.themes.default({
     body: {
       "max-width": `${READING_COLUMN_WIDTH}px !important`,
@@ -70,12 +95,12 @@ function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number)
     // Seleção nativa do navegador — sem isso, o fundo padrão (geralmente um
     // azul claro do sistema) some contra o texto claro forçado no tema
     // escuro pela regra "*" acima (texto claro sobre fundo claro = quase
-    // invisível). --panel-hover é o mesmo par usado pra isso no editor
-    // CodeMirror das notas .md, resolvido aqui pro valor real (variáveis CSS
-    // não atravessam pro documento do iframe do capítulo).
+    // invisível). Cor calculada acima (selectionBackground) — variáveis CSS
+    // não atravessam pro documento do iframe do capítulo, por isso o valor
+    // já vem resolvido em vez de "var(--accent)" direto.
     "::selection": {
-      background: `${panelHover} !important`,
-      color: `${foreground} !important`,
+      background: `${selectionBackground} !important`,
+      color: `${background} !important`,
     },
     // Muitos EPUBs acadêmicos usam <a> pra referências/notas de rodapé no
     // meio do parágrafo (às vezes sem destino nenhum, só semântica), sem
@@ -107,6 +132,46 @@ function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number)
 // Formato nativo de book.navigation.toc (epub.js) — recursivo, uma entrada
 // por capítulo/subseção do sumário do próprio EPUB.
 export type TocEntry = { id: string; href: string; label: string; subitems?: TocEntry[] };
+
+// Navega via rendition.display() suprimindo só o glitch de prepend indevido
+// que o manager "continuous" do epub.js faz logo após QUALQUER display()
+// fresco: internamente ele chama fill()→check(), que compara scrollTop
+// (=0, recém-exibido) contra a margem de pré-carregamento (settings.offset,
+// padrão 500) — `0 - 500 < 0` é sempre verdadeiro nesse instante, então ele
+// PREPENDA a seção ANTERIOR por engano. O ajuste de scroll feito pra
+// compensar essa inserção depende de eventos de resize assíncronos (imagens/
+// fontes carregando) e frequentemente erra, deixando a posição visível ANTES
+// do começo real da seção alvo (link de capítulo/Sumário/retomada de posição
+// pousam "no meio" do capítulo ANTERIOR, não no início do capítulo certo).
+//
+// A correção antiga zerava settings.offset PRA SEMPRE (na criação do
+// rendition) — resolvia esse glitch, mas quebrava a rolagem contínua normal:
+// esse mesmo settings.offset também é a margem que o manager usa pra
+// carregar o PRÓXIMO capítulo um pouco ANTES do fim da página durante a
+// leitura. Sem margem nenhuma, o gatilho de carregamento (`scrollTop +
+// altura visível >= altura total do conteúdo`) raramente bate exato por
+// causa de arredondamento de subpixel do navegador — na prática, rolar até
+// o fim de um capítulo nunca carregava o próximo sozinho, só manualmente
+// pelo Sumário (regressão real).
+//
+// Fix certo: zerar settings.offset só DURANTE esta chamada de display() (a
+// única hora em que o glitch pode acontecer) e restaurar o valor de
+// verdade logo depois — rendition.display() só resolve depois que o
+// fill()/check() interno do manager já terminou (Rendition._display →
+// manager.display() → fill()), então dá pra restaurar com segurança
+// assim que o await volta.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function displayWithoutPrependGlitch(rendition: any, target?: string) {
+  const manager = rendition?.manager;
+  const settings = manager?.settings;
+  const realOffset = settings?.offset;
+  if (settings && typeof realOffset === "number") settings.offset = 0;
+  try {
+    await rendition.display(target);
+  } finally {
+    if (settings && typeof realOffset === "number") settings.offset = realOffset;
+  }
+}
 
 type Props = {
   filename: string;
@@ -281,7 +346,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
 
   useImperativeHandle(ref, () => ({
     goToCfi(cfi: string) {
-      renditionRef.current?.display(cfi);
+      if (renditionRef.current) displayWithoutPrependGlitch(renditionRef.current, cfi);
     },
     async getFullText() {
       const book = bookRef.current;
@@ -426,27 +491,10 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
         flow: "scrolled",
         manager: "continuous",
         spread: "none",
-        // Sem isso (padrão do epub.js: offset 500/offsetDelta 250), TODA
-        // chamada de display() — link de capítulo, clique no Sumário,
-        // retomada de posição salva — pousa fora do lugar certo: logo após
-        // exibir a seção alvo com scrollTop=0, o manager "continuous" checa
-        // se `scrollTop - offset < 0" (sempre verdadeiro com offset > 0
-        // nesse instante) e PREPENDA automaticamente a seção ANTERIOR pra
-        // manter uma margem de pré-carregamento — o ajuste de scroll feito
-        // pra compensar essa inserção depende de eventos de resize
-        // assíncronos (imagens/fontes carregando), então frequentemente erra
-        // e deixa a posição visível ANTES do começo real da seção alvo (ou
-        // seja, parece "no meio" do capítulo ANTERIOR, não no início do
-        // capítulo clicado). offset:0 faz esse cálculo nunca disparar numa
-        // navegação fresca (scrollTop já começa em 0), sem afetar o
-        // pré-carregamento de seções durante rolagem normal (que continua
-        // reagindo ao scroll de verdade, só sem a margem antecipada).
-        // `offset`/`offsetDelta` são configurações do manager "continuous"
-        // específico do epub.js (ver ContinuousViewManager em
-        // node_modules/epubjs/src/managers/continuous/index.js) — não
-        // declaradas no tipo RenditionOptions dos @types, por isso `any`.
-        offset: 0,
-        offsetDelta: 0,
+        // offset/offsetDelta ficam no padrão do epub.js (500/250) — ver
+        // displayWithoutPrependGlitch abaixo pra por que NÃO zeramos isso
+        // aqui globalmente (era a causa de uma regressão real: rolagem
+        // contínua parava de avançar sozinha pro próximo capítulo).
       };
       const rendition = book.renderTo(viewerEl, renditionOptions);
       renditionRef.current = rendition;
@@ -457,7 +505,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // o seu) é injetado antes da nossa folha de estilo e, sem "!important",
       // um simples "body { max-width }"/cor do livro já venceria por ordem de
       // origem.
-      applyReadingTheme(rendition, noteFont, fontSize);
+      applyReadingTheme(rendition, noteFont, fontSize, theme);
 
       // Fecha o menu de IA ao clicar dentro do conteúdo do EPUB sem gerar
       // uma seleção nova, ou ao apertar ESC com o foco lá dentro — cliques e
@@ -496,7 +544,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // Prioridade: capítulo de link explícito > CFI de posição salva > início
       // do livro (rendition.display já aceita href OU CFI diretamente).
       const initialHref = initialChapter ? resolveChapterHref(book, initialChapter) : initialCfi;
-      await rendition.display(initialHref);
+      await displayWithoutPrependGlitch(rendition, initialHref);
       if (cancelled) return;
 
       onTocLoadedRef.current?.((book.navigation?.toc ?? []) as TocEntry[]);
@@ -617,7 +665,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   useEffect(() => {
     if (!initialChapter || !bookRef.current) return;
     const href = resolveChapterHref(bookRef.current, initialChapter);
-    if (href) renditionRef.current?.display(href);
+    if (href && renditionRef.current) displayWithoutPrependGlitch(renditionRef.current, href);
   }, [initialChapter]);
 
   // Mesma ideia, mas pra CFI de posição salva — cobre o caso (raro) de a
@@ -625,8 +673,8 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   // rendition já montou no início do livro. Só age quando não há capítulo
   // explícito (prioridade do link, mesmo raciocínio da montagem acima).
   useEffect(() => {
-    if (!initialCfi || initialChapter || !bookRef.current) return;
-    renditionRef.current?.display(initialCfi);
+    if (!initialCfi || initialChapter || !bookRef.current || !renditionRef.current) return;
+    displayWithoutPrependGlitch(renditionRef.current, initialCfi);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialCfi]);
 
@@ -635,7 +683,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   // menu "⋯" — getReadingColors()/getReadingFontFamily() leem o valor atual
   // das variáveis CSS, então só precisamos disparar a reaplicação de novo.
   useEffect(() => {
-    if (renditionRef.current) applyReadingTheme(renditionRef.current, noteFont, fontSize);
+    if (renditionRef.current) applyReadingTheme(renditionRef.current, noteFont, fontSize, theme);
   }, [theme, noteFont, fontSize]);
 
   return (
