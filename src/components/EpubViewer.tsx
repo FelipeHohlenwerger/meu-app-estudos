@@ -133,6 +133,30 @@ function applyReadingTheme(rendition: any, fontId: NoteFontId, fontSize: number,
 // por capítulo/subseção do sumário do próprio EPUB.
 export type TocEntry = { id: string; href: string; label: string; subitems?: TocEntry[] };
 
+// Achata book.navigation.toc (recursivo) numa lista só — usado pra achar,
+// dado um arquivo do spine, se ele corresponde a alguma entrada da navegação
+// oficial do EPUB (ver fixInternalChapterLinks abaixo).
+function flattenToc(entries: TocEntry[]): TocEntry[] {
+  const out: TocEntry[] = [];
+  for (const entry of entries) {
+    out.push(entry);
+    if (entry.subitems?.length) out.push(...flattenToc(entry.subitems));
+  }
+  return out;
+}
+
+// Rótulo (da navegação oficial do EPUB) que identifica uma página como sendo
+// o sumário/índice IMPRESSO do livro — normalizado (sem acento, minúsculo)
+// pra cobrir "Sumário", "Índice" (PT) e "Contents"/"Table of Contents" (EN)
+// sem depender de um livro específico.
+function isTocLikeLabel(label: string): boolean {
+  const normalized = label
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return /sumario|indice|contents|\btoc\b/.test(normalized);
+}
+
 // Navega via rendition.display() suprimindo só o glitch de prepend indevido
 // que o manager "continuous" do epub.js faz logo após QUALQUER display()
 // fresco: internamente ele chama fill()→check(), que compara scrollTop
@@ -537,6 +561,79 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
         contents.document.addEventListener("keydown", keyHandler);
         contentCloseListeners.push({ contents, type: "mousedown", handler: mouseHandler });
         contentCloseListeners.push({ contents, type: "keydown", handler: keyHandler });
+      });
+
+      // Corrige a navegação por link de sumário IMPRESSO NO PRÓPRIO CORPO do
+      // livro (alguns livros — ex: "Ultraaprendizado", de Scott Young —
+      // imprimem o próprio índice nas primeiras páginas, com link pra cada
+      // capítulo). O epub.js já trata esses links como navegação interna
+      // (linksHandler/replaceLinks, em epubjs/src/utils/replacements.js) e,
+      // quando o href do link inclui uma âncora ("capitulo5.xhtml#algumaId"),
+      // preserva essa âncora e rola até ELA — que não é necessariamente o
+      // início real do capítulo (o "#id" de uma entrada de índice impressa no
+      // corpo aponta pra onde o EDITOR do livro colocou aquele id, não pro
+      // topo do arquivo). O sumário do CABEÇALHO do app (EpubTocDrawer) não
+      // tem esse problema porque navega pelo href de book.navigation.toc, que
+      // já é só o arquivo do capítulo (sem âncora) — daí sempre ir pro início.
+      //
+      // Cuidado importante (achado testando com o livro real): não dá pra
+      // simplesmente ignorar a âncora de QUALQUER link que aponte pra outro
+      // arquivo do spine — muitos EPUBs (inclusive este) têm um arquivo de
+      // notas de rodapé COMPARTILHADO, referenciado de VÁRIOS capítulos
+      // diferentes, cada nota de rodapé com sua PRÓPRIA âncora específica
+      // ("parteN.html#footnote-042") — ignorar a âncora nesse caso levaria
+      // sempre pro TOPO do arquivo de notas, nunca pra nota certa. A
+      // diferença de verdade não é "mesmo arquivo ou não", é DE ONDE o link
+      // parte: só uma página que o PRÓPRIO EPUB rotula como sumário/índice na
+      // navegação oficial (book.navigation.toc) deve ter seus links de saída
+      // corrigidos — uma nota de rodapé nunca parte de uma página dessas.
+      //
+      // Fix: contents.document já tem os onclick que o epub.js atribuiu a
+      // cada link interno (Contents.listeners()/linksHandler roda no
+      // CONSTRUTOR de Contents, sempre antes de afterDisplayed() disparar
+      // hooks.content — ver epubjs/src/contents.js e rendition.js). Só
+      // quando a seção ATUAL é uma página de sumário/índice (isTocLikeLabel),
+      // para cada link de saída cuja âncora aponta pra uma seção do spine
+      // DIFERENTE da atual, sobrescrevemos o onclick pra ignorar a âncora e
+      // navegar só pro arquivo, igual ao sumário do cabeçalho.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rendition.hooks.content.register((contents: any) => {
+        const doc: Document = contents.document;
+        const currentSection = bookRef.current?.spine?.get(contents.sectionIndex);
+        if (!currentSection) return;
+        const currentFile = currentSection.href.split("#")[0];
+        const tocEntries = flattenToc((bookRef.current?.navigation?.toc ?? []) as TocEntry[]);
+        const currentIsTocPage = tocEntries.some(
+          (entry) => entry.href.split("#")[0] === currentFile && isTocLikeLabel(entry.label)
+        );
+        if (!currentIsTocPage) return;
+        const anchors = Array.from(doc.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+        for (const a of anchors) {
+          // epub.js só define onclick pra link que ELE MESMO considerou
+          // interno (replaceLinks, em replacements.js) — absoluto (http://) e
+          // mailto: ficam sem onclick, então esse filtro já exclui os dois
+          // sem precisar reimplementar essa checagem aqui.
+          if (typeof a.onclick !== "function") continue;
+          const rawHref = a.getAttribute("href") ?? "";
+          if (rawHref.indexOf("#") === -1) continue; // sem âncora — já vai pro início normalmente
+          let targetPath: string;
+          try {
+            // Resolução nativa de URL relativa (mesma regra de um <base> HTML)
+            // contra o caminho do capítulo ATUAL — origem fictícia só pra ter
+            // uma base absoluta válida pro construtor de URL; descartada logo
+            // depois, junto com o "/" inicial que ela introduz.
+            targetPath = new URL(rawHref, "https://epub.invalid/" + currentSection.href).pathname.replace(/^\//, "");
+          } catch {
+            continue;
+          }
+          const targetSection = bookRef.current?.spine?.get(targetPath);
+          if (targetSection && targetSection.index !== currentSection.index) {
+            a.onclick = () => {
+              if (renditionRef.current) displayWithoutPrependGlitch(renditionRef.current, targetSection.href);
+              return false;
+            };
+          }
+        }
       });
 
       await book.ready;

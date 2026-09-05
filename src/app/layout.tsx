@@ -1,7 +1,15 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Fraunces, Lora, Literata, Source_Serif_4, Inter, Atkinson_Hyperlegible } from "next/font/google";
 import Script from "next/script";
+import AppShell from "@/components/AppShell";
 import "./globals.css";
+
+// Todo o app é dinâmico (índice SQLite local, single-user) — não há nada
+// pra pré-renderizar estaticamente. Setado aqui (não em cada page.tsx) desde
+// a correção do bug de "flicker" na navegação: ver comentário grande abaixo,
+// sobre AppShell ter subido pro layout raiz — force-dynamic aqui já vale pra
+// toda rota da árvore, sem precisar repetir em cada page.tsx fino.
+export const dynamic = "force-dynamic";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -66,7 +74,27 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {/* AppShell mora AQUI (no layout raiz), não em cada page.tsx — ver bug
+            corrigido: cada rota (/, /notes/[filename], /reader/[filename]
+            etc.) tinha seu PRÓPRIO page.tsx renderizando <AppShell/>, e o
+            App Router troca o conteúdo de "children" por um componente NOVO
+            a cada navegação entre rotas irmãs (o "Page" de um arquivo é um
+            tipo de componente diferente do "Page" de outro arquivo, mesmo
+            retornando o mesmo JSX) — React desmonta e remonta a árvore
+            inteira nesse ponto a cada clique, o que na prática parecia um
+            reload completo (sidebar "piscando", perdendo scroll/estado,
+            revalidando vaults/library do zero). O layout raiz, ao contrário
+            de "page.tsx", NUNCA remonta entre navegações client-side pra
+            rotas que ele engloba — é exatamente a garantia que faltava.
+            AppShell não precisa de nada vindo de "children" (lê a tela atual
+            direto da URL via usePathname/useParams/useSearchParams), mas
+            "children" continua renderizado normalmente (sempre null agora,
+            já que cada page.tsx virou um placeholder vazio) só pra manter o
+            contrato usual do layout. */}
+        <AppShell />
+        {children}
+      </body>
     </html>
   );
 }

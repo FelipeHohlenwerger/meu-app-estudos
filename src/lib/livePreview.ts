@@ -412,7 +412,12 @@ const blockMarkerMark = Decoration.mark({
 // gerais e permitir apagar; opcional no regex pra continuar reconhecendo
 // comentários já existentes gravados antes desse id existir — ver
 // migrateOldAnchoredComments em NotePanel.tsx).
-export const COMMENT_REGEX = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
+// "[\s\S]" em vez de "." (equivalente à flag "s"/dotAll, indisponível no
+// target ES2017 do projeto): sem isso, "." nunca bate com quebra de linha,
+// então um comentário ancorado num trecho que atravessa um parágrafo (linha
+// em branco no meio) simplesmente não seria reconhecido — a sintaxe bruta
+// "~...~¶..." ficaria visível em vez de virar a marcação.
+export const COMMENT_REGEX = /~([\s\S]+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
 
 // Reconhece a REFERÊNCIA de nota de rodapé "[^id]" (não a definição "[^id]:",
 // que fica de fora via o "(?!:)" — essa continua visível como markdown puro).
@@ -427,7 +432,12 @@ const TIMESTAMP_REGEX = /\b(?:(\d{1,2}):)?([0-5]?\d):([0-5]\d)\b/g;
 
 
 // Reconhece: ==texto destacado==§tipo
-export const HIGHLIGHT_REGEX = /==(.+?)==§(\w+)(:sub)?/g;
+// "[\s\S]" em vez de "." (equivalente à flag "s"/dotAll, indisponível no
+// target ES2017 do projeto): sem isso, "." não bate com quebra de linha — um
+// destaque/sublinhado cujo texto atravessa um parágrafo (linha em branco no
+// meio, ex: selecionar dois parágrafos de uma vez) nunca fechava o match, e a
+// sintaxe bruta "==...==§tipo" ficava visível em vez de virar a marcação.
+export const HIGHLIGHT_REGEX = /==([\s\S]+?)==§(\w+)(:sub)?/g;
 
 class HighlightIconWidget extends WidgetType {
   constructor(
@@ -1158,7 +1168,7 @@ function escapeHtml(text: string): string {
 // ancorados no parágrafo original, não fariam sentido duplicados no card).
 function renderEmbedBodyHtml(text: string): string {
   let html = escapeHtml(text);
-  html = html.replace(/==(.+?)==§(\w+)(:sub)?/g, (_match, inner: string, tipo: string, isSub: string) => {
+  html = html.replace(/==([\s\S]+?)==§(\w+)(:sub)?/g, (_match, inner: string, tipo: string, isSub: string) => {
     if (isSub) {
       const color = underlineColors[tipo] ?? "#666666";
       return `<span style="text-decoration: underline; text-decoration-color: ${color}; text-decoration-thickness: 2px;">${inner}</span>`;

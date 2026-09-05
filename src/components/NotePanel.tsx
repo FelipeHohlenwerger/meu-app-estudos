@@ -1510,7 +1510,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
   function findHighlightAt(view: EditorView, pos: number) {
     const text = view.state.doc.toString();
-    const regex = /==(.+?)==§(\w+)(:sub)?/g;
+    // "[\s\S]" em vez de "." (equivalente à flag "s"/dotAll, indisponível no
+    // target ES2017 do projeto): destaque/sublinhado que atravessa um
+    // parágrafo (linha em branco no meio) tem "\n" dentro do próprio match —
+    // sem isso "." não bate com quebra de linha e o regex nunca fecha.
+    const regex = /==([\s\S]+?)==§(\w+)(:sub)?/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       const start = match.index;
@@ -1524,7 +1528,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
   function findCommentAt(view: EditorView, pos: number): boolean {
     const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
+    const regex = /~([\s\S]+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       const start = match.index;
@@ -1537,7 +1541,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   // "id" é o id da linha placeholder em book_comments (ver migrateOldAnchoredComments
   // logo abaixo) — undefined pra comentários ainda não migrados pro novo formato.
   function listComments(text: string) {
-    const regex = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
+    const regex = /~([\s\S]+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
     const results: { from: number; to: number; tipo: string; anchorText: string; comentario: string; id?: number }[] = [];
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
@@ -1726,7 +1730,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     const view = editorViewRef.current;
     if (!view) return;
     const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
+    const regex = /~([\s\S]+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       if (match.index === from) {
@@ -1748,7 +1752,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     const view = editorViewRef.current;
     if (!view) return;
     const text = view.state.doc.toString();
-    const regex = /~(.+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
+    const regex = /~([\s\S]+?)~¶(\w+){([^}]*)}(?:¶(\d+))?/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {
       if (match.index === from) {

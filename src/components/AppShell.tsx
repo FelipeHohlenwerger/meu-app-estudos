@@ -2012,6 +2012,25 @@ export default function AppShell() {
           </>
         )}
 
+        {/* Acesso direto à galeria Calibre a partir de qualquer tela — antes só
+            dava pra chegar lá pelo card da Homepage ou pela aba "Calibre" da
+            sidebar (essa só existe dentro do editor). Mesmo estilo/padrão do
+            "Graph view" ao lado (rótulo de texto, sem ícone, destaca quando a
+            própria tela já é a galeria). */}
+        <button
+          onClick={() => router.push(hrefForView({ kind: "calibreLibrary" }))}
+          className="toolbar-link"
+          style={{
+            padding: "0.4rem 0.8rem",
+            background: homeView.kind === "calibreLibrary" ? "var(--panel-hover)" : undefined,
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+          }}
+        >
+          Calibre
+        </button>
+
         <button
           onClick={toggleGraphPanel}
           className="toolbar-link"
