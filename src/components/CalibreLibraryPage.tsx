@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import CalibreBookCard from "@/components/CalibreBookCard";
 import type { CalibreBook } from "@/lib/calibreLibrary";
-import { formatTagLabel } from "@/lib/tagTree";
+import { formatTagLabel, isPathWithin } from "@/lib/tagTree";
 
 const CARD_WIDTH = 220;
 
@@ -255,9 +255,14 @@ export default function CalibreLibraryPage({ books, error, onBack, onOpenBook, f
   );
   const allAuthors = useMemo(() => Array.from(new Set(books.flatMap((b) => b.authors))).sort(), [books]);
 
+  // Assunto usa hierarquia por "." (mesma convenção de tags, ver tagTree.ts):
+  // selecionar um assunto pai (ex: "Educação") também deve trazer os livros
+  // que só têm um assunto filho (ex: "Educação.Clássica"), não só o literal
+  // exato — daí isPathWithin em vez de includes() aqui. Série/Autor não têm
+  // essa hierarquia, continuam com match exato.
   const filtered = books.filter(
     (b) =>
-      (subjectFilters.length === 0 || subjectFilters.every((f) => b.subjects.includes(f))) &&
+      (subjectFilters.length === 0 || subjectFilters.every((f) => b.subjects.some((s) => isPathWithin(s, f)))) &&
       (seriesFilters.length === 0 || (b.series !== null && seriesFilters.includes(b.series))) &&
       (authorFilters.length === 0 || authorFilters.every((f) => b.authors.includes(f)))
   );
