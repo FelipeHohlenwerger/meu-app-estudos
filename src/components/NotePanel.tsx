@@ -34,6 +34,8 @@ import CommentModal from "@/components/CommentModal";
 import CalloutSlashMenu from "@/components/CalloutSlashMenu";
 import WikiLinkMenu from "@/components/WikiLinkMenu";
 import FootnotePopup from "@/components/FootnotePopup";
+import LinkContextMenu from "@/components/LinkContextMenu";
+import EditLinkPopup from "@/components/EditLinkPopup";
 import ImageControlPanel from "@/components/ImageControlPanel";
 import FontSizePopup from "@/components/FontSizePopup";
 import CoverMenu from "@/components/CoverMenu";
@@ -505,6 +507,17 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [aiStatus, setAiStatus] = useState<{ x: number; y: number; state: "loading" | "error"; message?: string } | null>(null);
   const [footnotePopup, setFootnotePopup] = useState<{ content: string; x: number; y: number } | null>(null);
+  // Menu de contexto (botão direito) e popup de edição de um link externo
+  // (Markdown [texto](url) ou URL solta) — from/to é o span da sintaxe crua
+  // no documento (ver data-link-from/data-link-to em externalLinkMarkFor,
+  // livePreview.ts), pra edição/substituição não precisar reconsultar a
+  // árvore de sintaxe a partir do clique.
+  const [linkContextMenu, setLinkContextMenu] = useState<
+    { x: number; y: number; text: string; url: string; from: number; to: number } | null
+  >(null);
+  const [editLinkPopup, setEditLinkPopup] = useState<
+    { x: number; y: number; text: string; url: string; from: number; to: number } | null
+  >(null);
   const [fontSizePopupAnchor, setFontSizePopupAnchor] = useState<{ x: number; y: number } | null>(null);
   const [selectedImage, setSelectedImage] = useState<{
     alt: string;
@@ -1915,6 +1928,38 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     mousedown(event) {
       const target = event.target as HTMLElement;
 
+      const externalLinkEl = target.closest(".external-link") as HTMLElement | null;
+      if (externalLinkEl) {
+        const url = externalLinkEl.getAttribute("data-external-url");
+        if (url) {
+          if (event.button === 2) {
+            // Botão direito: não abre nada aqui (quem decide é o handler
+            // "contextmenu" abaixo) — só impede o comportamento padrão de
+            // mousedown de posicionar o cursor em cima do link. Sem isso, o
+            // clique direito reaparecia a sintaxe crua ("[texto](url)", ver
+            // cursorTouches em livePreview.ts) bem no instante de abrir o
+            // menu, contaminando "Copiar texto do link"/"Editar link" com a
+            // sintaxe crua em vez do texto visível (bug real, achado
+            // testando: o textContent do <span> refletia a sintaxe exposta).
+            event.preventDefault();
+            return true;
+          }
+          event.preventDefault();
+          setLinkContextMenu(null);
+          setEditLinkPopup(null);
+          // Botão do meio (1): abre em segundo plano, sem tirar o foco do
+          // app — window.open por si só já rouba o foco em todo navegador
+          // (não existe flag nativa pra abrir em background a partir de um
+          // <span>, só existe esse comportamento pra clique do meio numa <a>
+          // de verdade), então o truque é focar de volta a própria janela
+          // logo em seguida. Botão esquerdo (0): comportamento atual, sem
+          // mudança — window.open já foca a aba nova por padrão.
+          window.open(url, "_blank", "noopener,noreferrer");
+          if (event.button === 1) window.focus();
+          return true;
+        }
+      }
+
       const validEl = target.closest(".wiki-link") as HTMLElement | null;
       if (validEl) {
         const targetFilename = validEl.getAttribute("data-target-filename");
@@ -2010,7 +2055,44 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
       return false;
     },
+
+    // Botão direito num link externo: substitui o menu nativo do navegador
+    // (que não faz sentido pra um <span> decorado, não uma <a> de verdade)
+    // pelo menu customizado (LinkContextMenu, ver render mais abaixo).
+    contextmenu(event) {
+      const target = event.target as HTMLElement;
+      const externalLinkEl = target.closest(".external-link") as HTMLElement | null;
+      if (!externalLinkEl) return false;
+      const url = externalLinkEl.getAttribute("data-external-url");
+      const from = Number(externalLinkEl.getAttribute("data-link-from"));
+      const to = Number(externalLinkEl.getAttribute("data-link-to"));
+      if (!url || Number.isNaN(from) || Number.isNaN(to)) return false;
+      event.preventDefault();
+      setEditLinkPopup(null);
+      setLinkContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+        text: externalLinkEl.textContent ?? url,
+        url,
+        from,
+        to,
+      });
+      return true;
+    },
   });
+
+  // Substitui a sintaxe crua do link (from/to) por uma nova, a partir do
+  // texto/URL editados no popup. Igual (texto === url) vira URL solta
+  // (autolink); diferente vira "[texto](url)" — mesma regra que o Live
+  // Preview já usa pra decidir o que é uma coisa ou outra (ver "URL SOLTA" e
+  // "LINK EXTERNO" em livePreview.ts).
+  function applyLinkEdit(from: number, to: number, text: string, url: string) {
+    const view = editorViewRef.current;
+    if (!view) return;
+    const newSyntax = text === url ? url : `[${text}](${url})`;
+    view.dispatch({ changes: { from, to, insert: newSyntax } });
+    view.focus();
+  }
 
   function applyHighlight(tipo: string, modo: "fundo" | "sublinhado") {
     const view = editorViewRef.current;
@@ -2944,6 +3026,38 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
 
       {footnotePopup && (
         <FootnotePopup x={footnotePopup.x} y={footnotePopup.y} content={footnotePopup.content} onClose={() => setFootnotePopup(null)} />
+      )}
+
+      {linkContextMenu && (
+        <LinkContextMenu
+          x={linkContextMenu.x}
+          y={linkContextMenu.y}
+          onOpenBackground={() => {
+            window.open(linkContextMenu.url, "_blank", "noopener,noreferrer");
+            window.focus();
+          }}
+          onCopyLink={() => navigator.clipboard.writeText(linkContextMenu.url)}
+          onCopyText={() => navigator.clipboard.writeText(linkContextMenu.text)}
+          onEdit={() => {
+            setEditLinkPopup({ ...linkContextMenu });
+            setLinkContextMenu(null);
+          }}
+          onClose={() => setLinkContextMenu(null)}
+        />
+      )}
+
+      {editLinkPopup && (
+        <EditLinkPopup
+          x={editLinkPopup.x}
+          y={editLinkPopup.y}
+          initialText={editLinkPopup.text}
+          initialUrl={editLinkPopup.url}
+          onSave={(text, url) => {
+            applyLinkEdit(editLinkPopup.from, editLinkPopup.to, text, url);
+            setEditLinkPopup(null);
+          }}
+          onCancel={() => setEditLinkPopup(null)}
+        />
       )}
 
       {fontSizePopupAnchor && (

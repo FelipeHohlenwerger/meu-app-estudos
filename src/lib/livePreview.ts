@@ -276,6 +276,27 @@ function wikiLinkMarkFor(filename: string) {
   });
 }
 
+// Link Markdown externo válido ([texto](https://...)) ou URL solta (autolink):
+// mesmo estilo/hover dos demais links de conteúdo (classe "external-link", ver
+// globals.css). Clique esquerdo/do meio/direito (abrir em nova aba
+// focando/sem focar, menu de contexto com editar/copiar) tratados em
+// externalLinkInteractionHandlers, NotePanel.tsx — nunca navega a própria
+// nota, diferente de wiki-link. `range` é o span COMPLETO da sintaxe crua no
+// documento (o "[texto](url)" inteiro, ou a URL inteira no caso solto, nunca
+// só o texto visível) — vai em data-attributes pra o menu de contexto/popup
+// de edição saberem o que substituir ao salvar, sem precisar reconsultar a
+// árvore de sintaxe a partir de um clique no DOM.
+function externalLinkMarkFor(url: string, range: { from: number; to: number }) {
+  return Decoration.mark({
+    attributes: {
+      class: "external-link",
+      "data-external-url": url,
+      "data-link-from": String(range.from),
+      "data-link-to": String(range.to),
+    },
+  });
+}
+
 // Link quebrado: não corresponde a nenhuma nota (nem por título/alias) — "nota
 // fantasma", discreta (cor fraca, sem sublinhado) em vez de aviso chamativo;
 // clicar oferece criar a nota (ver wikiLinkClickHandler em page.tsx).
@@ -1347,6 +1368,51 @@ function buildDecorations(view: EditorView): DecorationSet {
             entries.push({ from: node.from, to: node.from + 1, decoration: hideMark });
             entries.push({ from: node.from + 1, to: node.to - 1, decoration: italicMark });
             entries.push({ from: node.to - 1, to: node.to, decoration: hideMark });
+          }
+        }
+
+        // --- LINK EXTERNO [texto](url) ---
+        // Diferente de negrito/itálico, os marcadores não têm largura fixa
+        // (a URL varia de tamanho) — por isso acha "[", "]" e a URL pelos
+        // filhos do próprio nó (mesmo padrão de CodeInfo/CodeMark usado pro
+        // bloco de código, ver buildCodeBlockDecorations abaixo) em vez de
+        // um offset fixo a partir de node.from/node.to.
+        if (node.name === "Link") {
+          const urlNode = node.node.getChild("URL");
+          const linkMarks = node.node.getChildren("LinkMark");
+          const openBracket = linkMarks[0];
+          const closeBracket = linkMarks[1];
+          const url = urlNode ? view.state.doc.sliceString(urlNode.from, urlNode.to) : "";
+          if (urlNode && openBracket && closeBracket && /^https?:\/\//i.test(url)) {
+            const range = { from: node.from, to: node.to };
+            const editing = cursorTouches(view, node.from, node.to);
+            if (editing) {
+              entries.push({ from: node.from, to: node.to, decoration: externalLinkMarkFor(url, range) });
+            } else {
+              entries.push({ from: node.from, to: openBracket.to, decoration: hideMark });
+              entries.push({ from: openBracket.to, to: closeBracket.from, decoration: externalLinkMarkFor(url, range) });
+              entries.push({ from: closeBracket.from, to: node.to, decoration: hideMark });
+            }
+          }
+        }
+
+        // --- URL SOLTA (autolink GFM: "https://..." sem colchetes) ---
+        // Diferente do link [texto](url) acima, aqui o texto visível JÁ É a
+        // própria sintaxe (a URL crua) — não tem nada pra esconder/revelar,
+        // mesmo espírito de footnoteRefMarkFor/timestampMarkFor (só aplica a
+        // marca, sempre). GFM (ver `markdown({ extensions: GFM })` em
+        // NotePanel.tsx) reconhece isso, mas gera um nó "URL" solto (o mesmo
+        // tipo de nó usado dentro de "(url)" de um Link normal — ver caso
+        // acima —, não um tipo "Autolink" próprio); por isso o filtro de
+        // `parent?.name !== "Link"`, senão isto rodaria de novo em cima da
+        // URL que o caso LINK EXTERNO já tratou (já escondida ali, então
+        // inofensivo na prática, mas redundante). Só cobre http(s) (mesmo
+        // filtro do link acima): "www." sem protocolo e e-mail/mailto
+        // (também reconhecidos pelo GFM como "URL") não têm pra onde abrir.
+        if (node.name === "URL" && node.node.parent?.name !== "Link") {
+          const raw = view.state.doc.sliceString(node.from, node.to);
+          if (/^https?:\/\//i.test(raw)) {
+            entries.push({ from: node.from, to: node.to, decoration: externalLinkMarkFor(raw, { from: node.from, to: node.to }) });
           }
         }
 
