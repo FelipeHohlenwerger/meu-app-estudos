@@ -16,7 +16,7 @@ const nextConfig: NextConfig = {
   // desktop ficaria inchado e vazaria dados do cache local. Nenhum desses
   // caminhos é necessário em runtime pro servidor standalone funcionar.
   outputFileTracingExcludes: {
-    "*": ["src-tauri/**", "dist-placeholder/**", ".data/**", "*.md", "scripts/**"],
+    "*": ["src-tauri/**", "dist-placeholder/**", ".data/**", "*.md", "scripts/**", ".git/**"],
   },
 };
 

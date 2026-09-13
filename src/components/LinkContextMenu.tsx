@@ -72,8 +72,15 @@ export default function LinkContextMenu({ x, y, onOpenBackground, onCopyLink, on
         <button
           key={item.label}
           onClick={() => {
-            item.onClick();
-            onClose();
+            // try/finally: se item.onClick() lançar (ex: uma ação de cópia
+            // que falhe), o menu ainda assim fecha — nunca deve travar aberto
+            // por causa de um erro numa ação individual (bug real relatado:
+            // clipboard indisponível fazia nem copiar nem fechar).
+            try {
+              item.onClick();
+            } finally {
+              onClose();
+            }
           }}
           onMouseEnter={() => setHovered(i)}
           onMouseLeave={() => setHovered(null)}

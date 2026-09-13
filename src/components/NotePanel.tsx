@@ -2081,6 +2081,36 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     },
   });
 
+  // navigator.clipboard.writeText pode não existir (ou lançar síncrono, não
+  // só rejeitar) em webviews mais restritos — o app desktop roda em
+  // webkit2gtk (ver Tauri no CLAUDE.md), que historicamente tem suporte
+  // incompleto à Clipboard API assíncrona. Sem esse cuidado, um clique em
+  // "Copiar link"/"Copiar texto do link" no LinkContextMenu lançava ANTES de
+  // chegar no onClose() do botão (ver LinkContextMenu.tsx), então nem
+  // copiava nem fechava o menu — bug real relatado. `document.execCommand`
+  // é depreciado mas segue funcionando universalmente como fallback.
+  async function copyToClipboard(text: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch {
+      // cai pro fallback abaixo
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
   // Substitui a sintaxe crua do link (from/to) por uma nova, a partir do
   // texto/URL editados no popup. Igual (texto === url) vira URL solta
   // (autolink); diferente vira "[texto](url)" — mesma regra que o Live
@@ -2809,6 +2839,17 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                   imageDropHandler,
                   editorTheme,
                   EditorView.lineWrapping,
+                  // Corretor ortográfico nativo do navegador: precisa ir no
+                  // atributo `spellcheck` do PRÓPRIO elemento contenteditable
+                  // (.cm-content) — setar isso no <CodeMirror> de fora (como
+                  // um spellCheck={true} do React no wrapper, se existisse
+                  // essa prop) não teria efeito, porque o texto de verdade
+                  // que o navegador sublinha/oferece sugestão ao clicar com o
+                  // botão direito vive em .cm-content, não no elemento pai.
+                  // contentAttributes é o facet do CodeMirror 6 que aplica
+                  // atributos exatamente ali (ver EditorView.contentAttributes
+                  // em @codemirror/view).
+                  EditorView.contentAttributes.of({ spellcheck: "true" }),
                 ]}
                 theme="none"
                 height="auto"
@@ -3036,8 +3077,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
             window.open(linkContextMenu.url, "_blank", "noopener,noreferrer");
             window.focus();
           }}
-          onCopyLink={() => navigator.clipboard.writeText(linkContextMenu.url)}
-          onCopyText={() => navigator.clipboard.writeText(linkContextMenu.text)}
+          onCopyLink={() => copyToClipboard(linkContextMenu.url)}
+          onCopyText={() => copyToClipboard(linkContextMenu.text)}
           onEdit={() => {
             setEditLinkPopup({ ...linkContextMenu });
             setLinkContextMenu(null);
