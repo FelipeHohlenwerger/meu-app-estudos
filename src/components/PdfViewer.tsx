@@ -31,8 +31,11 @@ type Props = {
   // age se o painel de tradução já estiver aberto (auto-tradução debounced).
   // onOpenTranslate dispara só no clique em "Traduzir" do menu flutuante
   // local — abre o painel e traduz imediatamente, sem debounce.
+  // onOpenDictionary é o equivalente pro clique em "Dicionário" — mesmo
+  // menu local, mesma seleção (translateMenu), só um botão a mais.
   onSelectionChange?: (texto: string) => void;
   onOpenTranslate?: (texto: string) => void;
+  onOpenDictionary?: (texto: string) => void;
 };
 
 export type PdfViewerHandle = {
@@ -126,7 +129,7 @@ function normalizeSelectedPdfText(raw: string): string {
 type PageDims = { width: number; height: number };
 
 const PdfViewer = forwardRef<PdfViewerHandle, Props>(function PdfViewer(
-  { filename, sourceUrl, initialPage, theme, onPageChange, onDocumentLoaded, onZoomChange, onError, onSelectionChange, onOpenTranslate },
+  { filename, sourceUrl, initialPage, theme, onPageChange, onDocumentLoaded, onZoomChange, onError, onSelectionChange, onOpenTranslate, onOpenDictionary },
   ref
 ) {
   const { vaultId } = useVault();
@@ -153,6 +156,8 @@ const PdfViewer = forwardRef<PdfViewerHandle, Props>(function PdfViewer(
   onSelectionChangeRef.current = onSelectionChange;
   const onOpenTranslateRef = useRef(onOpenTranslate);
   onOpenTranslateRef.current = onOpenTranslate;
+  const onOpenDictionaryRef = useRef(onOpenDictionary);
+  onOpenDictionaryRef.current = onOpenDictionary;
 
   // wrapperRef nunca é o elemento de scroll em si — só existe pra ser
   // medido (getBoundingClientRect), puro box de layout flex (flex:1,
@@ -736,6 +741,15 @@ const PdfViewer = forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     onOpenTranslateRef.current?.(texto);
   }
 
+  // Mesmo papel de handleTranslateClick acima, só que pro painel de
+  // dicionário (ver DictionaryPanel.tsx/openDictionaryPanel em NotePanel.tsx).
+  function handleDictionaryClick() {
+    if (!translateMenu) return;
+    const { texto } = translateMenu;
+    setTranslateMenu(null);
+    onOpenDictionaryRef.current?.(texto);
+  }
+
   const bgColor = theme === "dark" ? "var(--background)" : "var(--background)";
 
   return (
@@ -847,6 +861,7 @@ const PdfViewer = forwardRef<PdfViewerHandle, Props>(function PdfViewer(
           x={translateMenu.x}
           y={translateMenu.y}
           onTranslate={handleTranslateClick}
+          onDictionary={handleDictionaryClick}
           onClose={() => setTranslateMenu(null)}
         />
       )}

@@ -43,11 +43,13 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { filename, tipo, comment, anchored, anchorCfi, anchorText } = await request.json();
+    const { filename, tipo, comment, anchored, anchorCfi, anchorText, page, chapterLabel } = await request.json();
 
     if (!filename || typeof filename !== "string") {
       return NextResponse.json({ error: "Campo 'filename' é obrigatório" }, { status: 400 });
     }
+    const pageNum = typeof page === "number" ? page : undefined;
+    const chapterLabelStr = typeof chapterLabel === "string" ? chapterLabel : undefined;
 
     if (anchored && typeof anchorCfi === "string" && anchorCfi) {
       if (!tipo || typeof tipo !== "string") {
@@ -63,6 +65,8 @@ export async function POST(request: NextRequest) {
         comment,
         anchorCfi,
         anchorText: typeof anchorText === "string" ? anchorText : undefined,
+        page: pageNum,
+        chapterLabel: chapterLabelStr,
       });
       return NextResponse.json({ comment: bookComment });
     }
@@ -81,7 +85,12 @@ export async function POST(request: NextRequest) {
     }
 
     ensureIndexFresh(vaultId);
-    const bookComment = createBookComment(vaultId, path.basename(filename), { tipo, comment });
+    const bookComment = createBookComment(vaultId, path.basename(filename), {
+      tipo,
+      comment,
+      page: pageNum,
+      chapterLabel: chapterLabelStr,
+    });
 
     return NextResponse.json({ comment: bookComment });
   } catch (error) {

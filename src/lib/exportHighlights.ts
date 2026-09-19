@@ -1,6 +1,6 @@
 import jsPDF from "jspdf";
 import { HIGHLIGHT_REGEX, COMMENT_REGEX } from "@/lib/livePreview";
-import { highlightColors, underlineColors } from "@/lib/colors";
+import { highlightColors, underlineColors, calloutColors } from "@/lib/colors";
 
 // Rótulo de exibição pra cada "tipo" — os tipos já carregam um significado
 // (conceito, dúvidas, referências...), então servem como a legenda de cores
@@ -48,7 +48,7 @@ export function extractHighlightEntries(content: string): HighlightEntry[] {
   return matches.map((match) => match.entry);
 }
 
-function hexToRgb(hex: string): [number, number, number] {
+export function hexToRgb(hex: string): [number, number, number] {
   const clean = hex.replace("#", "");
   const r = parseInt(clean.slice(0, 2), 16);
   const g = parseInt(clean.slice(2, 4), 16);
@@ -59,17 +59,17 @@ function hexToRgb(hex: string): [number, number, number] {
 // Ícone de comentário: um pequeno balão de fala desenhado com formas
 // básicas (retângulo arredondado + "rabicho" triangular) — evita depender de
 // um emoji, que a fonte padrão do PDF não tem garantia de desenhar.
-function drawCommentIcon(doc: jsPDF, x: number, y: number) {
+export function drawCommentIcon(doc: jsPDF, x: number, y: number) {
   doc.setFillColor(140, 140, 140);
   doc.roundedRect(x, y - 3, 4.2, 3, 0.6, 0.6, "F");
   doc.triangle(x + 0.8, y, x + 2, y, x + 0.8, y + 1.4, "F");
 }
 
-const MARGIN = 18;
+export const MARGIN = 18;
 const LINE_HEIGHT = 6;
 const ENTRY_GAP = 6;
 
-function addPageIfNeeded(doc: jsPDF, y: number, needed: number, pageHeight: number): number {
+export function addPageIfNeeded(doc: jsPDF, y: number, needed: number, pageHeight: number): number {
   if (y + needed > pageHeight - MARGIN) {
     doc.addPage();
     return MARGIN;
@@ -80,8 +80,15 @@ function addPageIfNeeded(doc: jsPDF, y: number, needed: number, pageHeight: numb
 // Gera e dispara o download de um PDF com os destaques/comentários da nota,
 // na mesma ordem em que aparecem no texto original, cada um com sua cor
 // original — sem número de página nem seção de origem (só o trecho e, se
-// houver, o comentário associado).
-export function generateHighlightsPdf(noteTitle: string, entries: HighlightEntry[]): void {
+// houver, o comentário associado). `generalComments` (comentários soltos,
+// sem trecho ancorado — ver bookComments.ts) entram DEPOIS, marcados como
+// tal; o tipo deles é vocabulário de callout (não de destaque/sublinhado),
+// então usam `calloutColors`, não `highlightColors`/`underlineColors`.
+export function generateHighlightsPdf(
+  noteTitle: string,
+  entries: HighlightEntry[],
+  generalComments: { tipo: string; comment: string }[] = []
+): void {
   const doc = new jsPDF({ unit: "mm", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -167,6 +174,45 @@ export function generateHighlightsPdf(noteTitle: string, entries: HighlightEntry
     }
 
     y += ENTRY_GAP;
+  }
+
+  // Comentários gerais (sem trecho ancorado) — sempre depois dos destaques,
+  // já que não têm posição no texto pra intercalar por ordem. Cada um com um
+  // quadrado de cor (calloutColors, mesmo vocabulário de tipo do callout) e
+  // rótulo cru do tipo (mesma convenção usada em BookCommentsPanel.tsx —
+  // não existe hoje nenhum mapa tipo→rótulo em português no app).
+  if (generalComments.length > 0) {
+    y = addPageIfNeeded(doc, y, 12, pageHeight);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.setTextColor(60);
+    doc.text("Comentários gerais", MARGIN, y);
+    y += 8;
+
+    for (const c of generalComments) {
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(10);
+      const commentLines = doc.splitTextToSize(c.comment, contentWidth - 8);
+      const neededHeight = commentLines.length * 4.8 + ENTRY_GAP + 5;
+      y = addPageIfNeeded(doc, y, neededHeight, pageHeight);
+
+      const color = calloutColors[c.tipo] ?? "#999999";
+      const [r, g, b] = hexToRgb(color);
+      doc.setFillColor(r, g, b);
+      doc.rect(MARGIN, y - 3, 4, 4, "F");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(90);
+      doc.text(c.tipo, MARGIN + 6.5, y);
+      y += 6;
+
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(10);
+      doc.setTextColor(110);
+      doc.text(commentLines, MARGIN, y);
+      y += commentLines.length * 4.8 + ENTRY_GAP;
+      doc.setTextColor(20);
+    }
   }
 
   const safeName = noteTitle.replace(/[\\/:*?"<>|]/g, "-").trim() || "destaques";

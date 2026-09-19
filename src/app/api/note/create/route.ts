@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { title } = await request.json();
+    const { title, content: initialContent } = await request.json();
     if (!title || typeof title !== "string" || !title.trim()) {
       return NextResponse.json({ error: "Campo 'title' é obrigatório" }, { status: 400 });
     }
@@ -31,9 +31,12 @@ export async function POST(request: NextRequest) {
     const filename = findAvailableFilename(baseSlug, (f) => existsSync(path.join(vault.path, f)));
 
     const filePath = path.join(vault.path, filename);
-    // Corpo sempre nasce vazio — o título exibido em qualquer lugar do app vem
-    // sempre do nome do arquivo, não do corpo, então um H1 aqui seria redundante.
-    const content = "";
+    // Corpo nasce vazio por padrão — o título exibido em qualquer lugar do app
+    // vem sempre do nome do arquivo, não do corpo, então um H1 aqui seria
+    // redundante. `content` só é usado por criação derivada (ver
+    // handleCreateDerivedNote em AppShell.tsx — nota "Fichamento" a partir de
+    // destaques/comentários), que precisa nascer com conteúdo já pronto.
+    const content = typeof initialContent === "string" ? initialContent : "";
     writeFileSync(filePath, content, "utf-8");
 
     ensureIndexFresh(vaultId);

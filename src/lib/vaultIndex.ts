@@ -13,7 +13,7 @@ import { normalizeTagKey } from "@/lib/tagTree";
 // Versão do schema/parser. Bump isso sempre que mudar algo que precise reprocessar
 // notas já indexadas (ex: quando extractAliases/extractTitle passaram a existir de
 // verdade) — a migração força um reprocessamento completo quando a versão sobe.
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 // Caminho da pasta de UM vault, resolvido pelo registro — nunca mais uma
 // constante fixa (ver src/lib/vaultRegistry.ts). Lança se o id não existir no
@@ -268,6 +268,22 @@ function migrate(conn: DatabaseSync): void {
     // .md; livros ficam agrupados na data de importação até a primeira
     // atividade de verdade (comentário/status) neles.
     conn.exec("UPDATE notes SET last_activity_ms = mtime_ms WHERE last_activity_ms IS NULL");
+  }
+
+  if (versionRow.user_version < 17) {
+    // A partir da v17, comentário de livro passa a guardar ONDE foi criado —
+    // página (PDF) ou rótulo de capítulo (EPUB) — pra poder aparecer como
+    // referência de origem na exportação em PDF e na nota "Fichamento"
+    // gerada a partir dos comentários (ver exportBookComments.ts/fichamento.ts).
+    // Comentários criados antes dessa versão ficam com as duas colunas NULL;
+    // quem lê já trata isso omitindo a linha de rodapé, sem quebrar nada.
+    const bcColumns = conn.prepare("PRAGMA table_info(book_comments)").all() as { name: string }[];
+    if (!bcColumns.some((c) => c.name === "page")) {
+      conn.exec("ALTER TABLE book_comments ADD COLUMN page INTEGER");
+    }
+    if (!bcColumns.some((c) => c.name === "chapter_label")) {
+      conn.exec("ALTER TABLE book_comments ADD COLUMN chapter_label TEXT");
+    }
   }
 
   // Força reprocessar toda a vault na próxima ensureIndexFresh() — título, aliases,
@@ -841,6 +857,11 @@ export type BookComment = {
   // pelas ações de IA) — ver migração v10 acima.
   anchorCfi?: string | null;
   anchorText?: string | null;
+  // Página (PDF) ou rótulo de capítulo (EPUB) no momento em que o comentário
+  // foi criado — ver migração v17 acima. NULL pra comentários anteriores a
+  // essa versão, ou pra comentários ancorados de nota .md (não se aplica).
+  page?: number | null;
+  chapterLabel?: string | null;
 };
 
 // Comentários de UMA nota/livro — gerais (PDF/EPUB e, agora, .md — não
@@ -856,8 +877,19 @@ export function getBookComments(vaultId: string, filename: string): BookComment[
     | undefined;
   if (!noteRow) return [];
   const rows = conn
-    .prepare("SELECT id, tipo, comment, anchored, anchor_cfi, anchor_text FROM book_comments WHERE note_id = ? ORDER BY id ASC")
-    .all(noteRow.id) as { id: number; tipo: string; comment: string; anchored: number; anchor_cfi: string | null; anchor_text: string | null }[];
+    .prepare(
+      "SELECT id, tipo, comment, anchored, anchor_cfi, anchor_text, page, chapter_label FROM book_comments WHERE note_id = ? ORDER BY id ASC"
+    )
+    .all(noteRow.id) as {
+    id: number;
+    tipo: string;
+    comment: string;
+    anchored: number;
+    anchor_cfi: string | null;
+    anchor_text: string | null;
+    page: number | null;
+    chapter_label: string | null;
+  }[];
   return rows.map((r) => ({
     id: r.id,
     tipo: r.tipo,
@@ -865,13 +897,23 @@ export function getBookComments(vaultId: string, filename: string): BookComment[
     anchored: r.anchored === 1,
     anchorCfi: r.anchor_cfi,
     anchorText: r.anchor_text,
+    page: r.page,
+    chapterLabel: r.chapter_label,
   }));
 }
 
 export function createBookComment(
   vaultId: string,
   filename: string,
-  data: { tipo?: string; comment?: string; anchored?: boolean; anchorCfi?: string; anchorText?: string }
+  data: {
+    tipo?: string;
+    comment?: string;
+    anchored?: boolean;
+    anchorCfi?: string;
+    anchorText?: string;
+    page?: number;
+    chapterLabel?: string;
+  }
 ): BookComment {
   const conn = getDb(vaultId);
   const noteRow = conn.prepare("SELECT id FROM notes WHERE filename = ? COLLATE NOCASE").get(filename) as
@@ -884,12 +926,54 @@ export function createBookComment(
   const comment = data.comment ?? "";
   const anchorCfi = data.anchorCfi ?? null;
   const anchorText = data.anchorText ?? null;
+  const page = data.page ?? null;
+  const chapterLabel = data.chapterLabel ?? null;
   const result = conn
-    .prepare("INSERT INTO book_comments (note_id, tipo, comment, anchored, anchor_cfi, anchor_text) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(noteRow.id, tipo, comment, anchored, anchorCfi, anchorText);
+    .prepare(
+      "INSERT INTO book_comments (note_id, tipo, comment, anchored, anchor_cfi, anchor_text, page, chapter_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(noteRow.id, tipo, comment, anchored, anchorCfi, anchorText, page, chapterLabel);
   touchActivity(vaultId, filename);
 
-  return { id: Number(result.lastInsertRowid), tipo, comment, anchored: !!data.anchored, anchorCfi, anchorText };
+  return {
+    id: Number(result.lastInsertRowid),
+    tipo,
+    comment,
+    anchored: !!data.anchored,
+    anchorCfi,
+    anchorText,
+    page,
+    chapterLabel,
+  };
+}
+
+// Altera tipo/texto de um comentário GERAL já existente (não ancorado de
+// .md — esse continua só editável pelo próprio texto da nota, ver
+// NotePanel.tsx/editComment). Página/capítulo/âncora não mudam aqui: são
+// capturados só no momento da criação, não fazem sentido "editar depois".
+export function updateBookComment(vaultId: string, id: number, data: { tipo: string; comment: string }): BookComment | null {
+  const conn = getDb(vaultId);
+  conn
+    .prepare("UPDATE notes SET last_activity_ms = ? WHERE id = (SELECT note_id FROM book_comments WHERE id = ?)")
+    .run(Date.now(), id);
+  conn.prepare("UPDATE book_comments SET tipo = ?, comment = ? WHERE id = ?").run(data.tipo, data.comment, id);
+
+  const row = conn
+    .prepare("SELECT id, tipo, comment, anchored, anchor_cfi, anchor_text, page, chapter_label FROM book_comments WHERE id = ?")
+    .get(id) as
+    | { id: number; tipo: string; comment: string; anchored: number; anchor_cfi: string | null; anchor_text: string | null; page: number | null; chapter_label: string | null }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    tipo: row.tipo,
+    comment: row.comment,
+    anchored: row.anchored === 1,
+    anchorCfi: row.anchor_cfi,
+    anchorText: row.anchor_text,
+    page: row.page,
+    chapterLabel: row.chapter_label,
+  };
 }
 
 export function deleteBookComment(vaultId: string, id: number): void {

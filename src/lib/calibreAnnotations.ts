@@ -26,6 +26,21 @@ function getDb(): DatabaseSync {
       anchor_text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_calibre_book_comments_book ON calibre_book_comments(calibre_book_id);
+  `);
+
+  // Página (PDF) ou rótulo de capítulo (EPUB) no momento da criação — mesma
+  // adição que a migração v17 de vaultIndex.ts, mas sem sistema de versão
+  // aqui (só CREATE TABLE IF NOT EXISTS), então guardado do mesmo jeito via
+  // PRAGMA table_info pra quem já tinha o banco criado sem essas colunas.
+  const ccColumns = conn.prepare("PRAGMA table_info(calibre_book_comments)").all() as { name: string }[];
+  if (!ccColumns.some((c) => c.name === "page")) {
+    conn.exec("ALTER TABLE calibre_book_comments ADD COLUMN page INTEGER");
+  }
+  if (!ccColumns.some((c) => c.name === "chapter_label")) {
+    conn.exec("ALTER TABLE calibre_book_comments ADD COLUMN chapter_label TEXT");
+  }
+
+  conn.exec(`
 
     -- Vínculo nota↔livro (metadado puro, não insere texto na nota — ver
     -- botão "Vincular" no visualizador, NotePanel.tsx). GLOBAL pelo mesmo
@@ -81,29 +96,68 @@ export type CalibreBookComment = {
   comment: string;
   anchorCfi?: string | null;
   anchorText?: string | null;
+  // Página (PDF) ou rótulo de capítulo (EPUB) no momento da criação — NULL
+  // pra comentários criados antes dessas colunas existirem.
+  page?: number | null;
+  chapterLabel?: string | null;
 };
 
 export function getCalibreBookComments(calibreBookId: number): CalibreBookComment[] {
   const conn = getDb();
   const rows = conn
     .prepare(
-      "SELECT id, tipo, comment, anchor_cfi, anchor_text FROM calibre_book_comments WHERE calibre_book_id = ? ORDER BY id ASC"
+      "SELECT id, tipo, comment, anchor_cfi, anchor_text, page, chapter_label FROM calibre_book_comments WHERE calibre_book_id = ? ORDER BY id ASC"
     )
-    .all(calibreBookId) as { id: number; tipo: string; comment: string; anchor_cfi: string | null; anchor_text: string | null }[];
-  return rows.map((r) => ({ id: r.id, tipo: r.tipo, comment: r.comment, anchorCfi: r.anchor_cfi, anchorText: r.anchor_text }));
+    .all(calibreBookId) as {
+    id: number;
+    tipo: string;
+    comment: string;
+    anchor_cfi: string | null;
+    anchor_text: string | null;
+    page: number | null;
+    chapter_label: string | null;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    tipo: r.tipo,
+    comment: r.comment,
+    anchorCfi: r.anchor_cfi,
+    anchorText: r.anchor_text,
+    page: r.page,
+    chapterLabel: r.chapter_label,
+  }));
 }
 
 export function createCalibreBookComment(
   calibreBookId: number,
-  data: { tipo: string; comment: string; anchorCfi?: string; anchorText?: string }
+  data: { tipo: string; comment: string; anchorCfi?: string; anchorText?: string; page?: number; chapterLabel?: string }
 ): CalibreBookComment {
   const conn = getDb();
   const anchorCfi = data.anchorCfi ?? null;
   const anchorText = data.anchorText ?? null;
+  const page = data.page ?? null;
+  const chapterLabel = data.chapterLabel ?? null;
   const result = conn
-    .prepare("INSERT INTO calibre_book_comments (calibre_book_id, tipo, comment, anchor_cfi, anchor_text) VALUES (?, ?, ?, ?, ?)")
-    .run(calibreBookId, data.tipo, data.comment, anchorCfi, anchorText);
-  return { id: Number(result.lastInsertRowid), tipo: data.tipo, comment: data.comment, anchorCfi, anchorText };
+    .prepare(
+      "INSERT INTO calibre_book_comments (calibre_book_id, tipo, comment, anchor_cfi, anchor_text, page, chapter_label) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(calibreBookId, data.tipo, data.comment, anchorCfi, anchorText, page, chapterLabel);
+  return { id: Number(result.lastInsertRowid), tipo: data.tipo, comment: data.comment, anchorCfi, anchorText, page, chapterLabel };
+}
+
+// Mesmo espírito de updateBookComment (vaultIndex.ts) — só tipo/texto,
+// página/capítulo/âncora ficam como capturados na criação.
+export function updateCalibreBookComment(id: number, data: { tipo: string; comment: string }): CalibreBookComment | null {
+  const conn = getDb();
+  conn.prepare("UPDATE calibre_book_comments SET tipo = ?, comment = ? WHERE id = ?").run(data.tipo, data.comment, id);
+
+  const row = conn
+    .prepare("SELECT id, tipo, comment, anchor_cfi, anchor_text, page, chapter_label FROM calibre_book_comments WHERE id = ?")
+    .get(id) as
+    | { id: number; tipo: string; comment: string; anchor_cfi: string | null; anchor_text: string | null; page: number | null; chapter_label: string | null }
+    | undefined;
+  if (!row) return null;
+  return { id: row.id, tipo: row.tipo, comment: row.comment, anchorCfi: row.anchor_cfi, anchorText: row.anchor_text, page: row.page, chapterLabel: row.chapter_label };
 }
 
 export function deleteCalibreBookComment(id: number): void {

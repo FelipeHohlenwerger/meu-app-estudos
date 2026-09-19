@@ -135,8 +135,10 @@ export type TocEntry = { id: string; href: string; label: string; subitems?: Toc
 
 // Achata book.navigation.toc (recursivo) numa lista só — usado pra achar,
 // dado um arquivo do spine, se ele corresponde a alguma entrada da navegação
-// oficial do EPUB (ver fixInternalChapterLinks abaixo).
-function flattenToc(entries: TocEntry[]): TocEntry[] {
+// oficial do EPUB (ver fixInternalChapterLinks abaixo). Exportada porque
+// NotePanel.tsx precisa da mesma resolução pra achar o rótulo do capítulo
+// atual (ver captura de página/capítulo ao criar comentário de livro).
+export function flattenToc(entries: TocEntry[]): TocEntry[] {
   const out: TocEntry[] = [];
   for (const entry of entries) {
     out.push(entry);
@@ -255,9 +257,12 @@ type Props = {
   // Clique em "Traduzir" no menu de seleção — pede pro pai (NotePanel.tsx)
   // abrir/reabastecer o painel lateral de tradução com este trecho.
   onOpenTranslate?: (texto: string) => void;
+  // Mesmo papel de onOpenTranslate, pro painel de dicionário.
+  onOpenDictionary?: (texto: string) => void;
   // Toda seleção finalizada (rendition.on("selected")), independente de
   // abrir ou não o menu de IA — o pai decide se age (só se o painel de
-  // tradução já estiver aberto, ver scheduleTranslateUpdate).
+  // tradução/dicionário já estiver aberto, ver scheduleTranslateUpdate/
+  // scheduleDictionaryUpdate).
   onSelectionChange?: (texto: string) => void;
 };
 
@@ -333,6 +338,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     onTocLoaded,
     onContentInteraction,
     onOpenTranslate,
+    onOpenDictionary,
     onSelectionChange,
   },
   ref
@@ -365,6 +371,8 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
   onContentInteractionRef.current = onContentInteraction;
   const onOpenTranslateRef = useRef(onOpenTranslate);
   onOpenTranslateRef.current = onOpenTranslate;
+  const onOpenDictionaryRef = useRef(onOpenDictionary);
+  onOpenDictionaryRef.current = onOpenDictionary;
   const onSelectionChangeRef = useRef(onSelectionChange);
   onSelectionChangeRef.current = onSelectionChange;
 
@@ -462,6 +470,14 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
     const { texto } = aiMenu;
     setAiMenu(null);
     onOpenTranslateRef.current?.(texto);
+  }
+
+  // Mesmo papel de handleTranslate acima, pro painel de dicionário.
+  function handleDictionary() {
+    if (!aiMenu) return;
+    const { texto } = aiMenu;
+    setAiMenu(null);
+    onOpenDictionaryRef.current?.(texto);
   }
 
   useEffect(() => {
@@ -795,6 +811,7 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
           y={aiMenu.y}
           onAiAction={handleAiAction}
           onTranslate={handleTranslate}
+          onDictionary={handleDictionary}
           onClose={() => setAiMenu(null)}
         />
       )}

@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
 //        POST /api/book-comments).
 export async function POST(request: NextRequest) {
   try {
-    const { calibreId, tipo, comment, anchorCfi, anchorText } = await request.json();
+    const { calibreId, tipo, comment, anchorCfi, anchorText, page, chapterLabel } = await request.json();
 
     if (!Number.isInteger(calibreId)) {
       return NextResponse.json({ error: "Campo 'calibreId' é obrigatório" }, { status: 400 });
@@ -34,6 +34,8 @@ export async function POST(request: NextRequest) {
       comment,
       anchorCfi: typeof anchorCfi === "string" ? anchorCfi : undefined,
       anchorText: typeof anchorText === "string" ? anchorText : undefined,
+      page: typeof page === "number" ? page : undefined,
+      chapterLabel: typeof chapterLabel === "string" ? chapterLabel : undefined,
     });
     return NextResponse.json({ comment: created });
   } catch (error) {

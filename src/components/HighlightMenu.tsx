@@ -22,6 +22,22 @@ function TranslateIcon() {
   );
 }
 
+// Livro aberto com linhas de texto internas (estilo "BookOpenText" do
+// Lucide, redesenhado à mão aqui — mesmo motivo de TranslateIcon: sem lib
+// nova, só stroke=currentColor pra herdar a cor do botão em qualquer tema).
+function DictionaryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 7v14" />
+      <path d="M16 12h2" />
+      <path d="M16 8h2" />
+      <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />
+      <path d="M6 12h2" />
+      <path d="M6 8h2" />
+    </svg>
+  );
+}
+
 type Props = {
   x: number;
   y: number;
@@ -33,6 +49,7 @@ type Props = {
   onComment?: (tipo: string) => void;
   onAiAction?: (action: AiAction) => void;
   onTranslate?: () => void;
+  onDictionary?: () => void;
   onClose?: () => void;
   // Clique dentro deste elemento não fecha o menu, mesmo fora do próprio
   // menu — usado pelo NotePanel.tsx pra excluir o editor CodeMirror, que já
@@ -46,7 +63,7 @@ type Props = {
   initialModo?: "fundo" | "sublinhado" | "comentario";
 };
 
-export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onAiAction, onTranslate, onClose, getExcludedElement, initialTipo, initialModo }: Props) {
+export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onAiAction, onTranslate, onDictionary, onClose, getExcludedElement, initialTipo, initialModo }: Props) {
   const [modo, setModo] = useState<"fundo" | "sublinhado" | "comentario">(initialModo ?? "fundo");
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -169,7 +186,7 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
       </div>
       )}
 
-      {(onAiAction || onTranslate) && (
+      {(onAiAction || onTranslate || onDictionary) && (
         <div
           style={{
             display: "flex",
@@ -245,6 +262,26 @@ export default function HighlightMenu({ x, y, onSelect, onRemove, onComment, onA
               }}
             >
               <TranslateIcon /> Traduzir
+            </button>
+          )}
+          {onDictionary && (
+            <button
+              onClick={onDictionary}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.4rem",
+                padding: "0.3rem 0.6rem",
+                fontSize: "12px",
+                textAlign: "left",
+                background: "transparent",
+                border: "1px solid var(--panel-border)",
+                borderRadius: "4px",
+                color: "var(--foreground)",
+                cursor: "pointer",
+              }}
+            >
+              <DictionaryIcon /> Dicionário
             </button>
           )}
         </div>

@@ -13,7 +13,15 @@ export class GeminiError extends Error {
 
 export type GeminiContent = { role: "user" | "model"; parts: { text: string }[] };
 
-export async function callGemini(params: { systemInstruction?: string; contents: GeminiContent[] }): Promise<string> {
+// `generationConfig` opcional — usado pelo dicionário (ver /api/dictionary)
+// pra pedir saída em JSON estruturado (responseMimeType: "application/json" +
+// responseSchema), em vez de texto livre. Repassado pro body da API tal como
+// veio, sem validação aqui — quem chama é responsável pelo schema.
+export async function callGemini(params: {
+  systemInstruction?: string;
+  contents: GeminiContent[];
+  generationConfig?: Record<string, unknown>;
+}): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new GeminiError(
@@ -29,11 +37,18 @@ export async function callGemini(params: { systemInstruction?: string; contents:
   // desta função).
   const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
 
-  const body: { contents: GeminiContent[]; systemInstruction?: { parts: { text: string }[] } } = {
+  const body: {
+    contents: GeminiContent[];
+    systemInstruction?: { parts: { text: string }[] };
+    generationConfig?: Record<string, unknown>;
+  } = {
     contents: params.contents,
   };
   if (params.systemInstruction) {
     body.systemInstruction = { parts: [{ text: params.systemInstruction }] };
+  }
+  if (params.generationConfig) {
+    body.generationConfig = params.generationConfig;
   }
 
   const geminiRes = await fetch(

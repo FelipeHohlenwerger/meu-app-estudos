@@ -239,11 +239,13 @@ type Props = {
   onToggleFavorite: (calibreId: number) => void;
 };
 
-// Página cheia da biblioteca Calibre — grade de capas reais com 3 filtros
-// combináveis (Assunto/Série/Autor, E lógico entre eles), diferente do modo
+// Página cheia da biblioteca Calibre — grade de capas reais com busca por
+// título (substring, sem acento-sensibilidade extra) e 3 filtros combináveis
+// (Assunto/Série/Autor, E lógico entre eles e a busca), diferente do modo
 // EXCLUSIVO da aba "Calibre" da sidebar (ver page.tsx). Sem filtro de
 // Editora (já disponível direto no Calibre, não precisa ser duplicado aqui).
 export default function CalibreLibraryPage({ books, error, onBack, onOpenBook, favoriteIds, onToggleFavorite }: Props) {
+  const [titleQuery, setTitleQuery] = useState("");
   const [subjectFilters, setSubjectFilters] = useState<string[]>([]);
   const [seriesFilters, setSeriesFilters] = useState<string[]>([]);
   const [authorFilters, setAuthorFilters] = useState<string[]>([]);
@@ -262,6 +264,7 @@ export default function CalibreLibraryPage({ books, error, onBack, onOpenBook, f
   // essa hierarquia, continuam com match exato.
   const filtered = books.filter(
     (b) =>
+      (titleQuery.trim() === "" || b.title.toLowerCase().includes(titleQuery.trim().toLowerCase())) &&
       (subjectFilters.length === 0 || subjectFilters.every((f) => b.subjects.some((s) => isPathWithin(s, f)))) &&
       (seriesFilters.length === 0 || (b.series !== null && seriesFilters.includes(b.series))) &&
       (authorFilters.length === 0 || authorFilters.every((f) => b.authors.includes(f)))
@@ -312,6 +315,22 @@ export default function CalibreLibraryPage({ books, error, onBack, onOpenBook, f
       )}
 
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "1.5rem" }}>
+        <input
+          type="text"
+          value={titleQuery}
+          onChange={(e) => setTitleQuery(e.target.value)}
+          placeholder="Buscar por título..."
+          style={{
+            minWidth: "220px",
+            flex: 1,
+            padding: "0.35rem 0.5rem",
+            border: "1px solid var(--panel-border)",
+            borderRadius: "6px",
+            background: "var(--panel-bg)",
+            color: "var(--foreground)",
+            fontSize: "0.85rem",
+          }}
+        />
         <CalibreFilterField placeholder="Assunto..." options={allSubjects} selected={subjectFilters} onChange={setSubjectFilters} formatOption={formatTagLabel} />
         <CalibreFilterField placeholder="Série..." options={allSeries} selected={seriesFilters} onChange={setSeriesFilters} />
         <CalibreFilterField placeholder="Autor..." options={allAuthors} selected={authorFilters} onChange={setAuthorFilters} />

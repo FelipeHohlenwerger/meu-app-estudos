@@ -225,13 +225,6 @@ export default function AppShell() {
   const panelARef = useRef<NotePanelHandle>(null);
   const panelBRef = useRef<NotePanelHandle>(null);
 
-  // Última tela (biblioteca/lista de tag/tema/etc.) antes de abrir uma nota
-  // no editor — permite o botão "Voltar" retornar exatamente pra onde a
-  // pessoa estava. Era useState (previousHomeView); vira ref porque o que
-  // guarda é, por definição, o que NÃO está mais na URL atual — não pode ser
-  // derivado dela, precisa sobreviver às trocas de rota por conta própria.
-  const previousViewHrefRef = useRef<string>("/");
-
   // Monta a URL completa (pathname + query) atual — usado pra capturar
   // "de onde eu vim" antes de navegar pro editor (ver openNoteInPanel).
   function currentHref(): string {
@@ -239,14 +232,39 @@ export default function AppShell() {
     return qs ? `${pathname}?${qs}` : pathname;
   }
 
+  // Pra onde "Voltar" (e as ações equivalentes: fechar o último painel sem
+  // outro pra promover, apagar a nota aberta em A) devem ir — a última tela
+  // fora do editor (biblioteca/lista de tag/tema/etc.) antes de abrir a nota
+  // atual. Vem do "?from=" da PRÓPRIA URL (ver hrefForItem/openNoteInPanel),
+  // não de um ref em memória (era assim antes: `useRef` guardando a última
+  // tela) — um ref se perde em qualquer navegação "dura" (F5 dentro do
+  // editor, abrir uma nota direto por URL/link salvo), fazendo Voltar cair
+  // sempre na biblioteca mesmo vindo de outro lugar (bug real, relatado).
+  // Embutido na URL, sobrevive a isso — mesmo princípio do resto da migração
+  // pra rotas reais: nada que precise sobreviver a F5 fica só em estado do
+  // React.
+  function previousViewHref(): string {
+    return searchParams.get("from") || "/";
+  }
+
   // Monta a URL de abrir `filename` no painel A, com o painel B e o
   // split-screen opcionalmente preservados/definidos — único ponto que decide
   // /notes/ vs /reader/ e serializa panelB/split/vault, usado por toda
-  // navegação que abre ou troca o conteúdo de um painel.
-  function hrefForItem(filename: string, opts?: { panelB?: string | null; split?: boolean; focus?: boolean }): string {
+  // navegação que abre ou troca o conteúdo de um painel. `from` (a tela de
+  // origem pro botão "Voltar", ver previousViewHref) só é recalculado quando
+  // explicitamente passado (ver openNoteInPanel, o único lugar que decide "de
+  // onde vim de verdade"); todo outro chamador (trocar split, fechar painel B,
+  // renomear, seguir um wikilink já dentro do editor, etc.) não passa `from`
+  // e cai no default de PRESERVAR o que já está na URL atual — exatamente
+  // como o ref antigo só atualizava vindo de fora do editor.
+  function hrefForItem(
+    filename: string,
+    opts?: { panelB?: string | null; split?: boolean; focus?: boolean; from?: string | null }
+  ): string {
     const base = (isReaderFilename(filename) ? "/reader/" : "/notes/") + encodeURIComponent(filename);
     const panelBFilename = opts?.panelB ?? null;
     const split = opts?.split ?? !!panelBFilename;
+    const from = opts?.from !== undefined ? opts.from : searchParams.get("from");
     return (
       base +
       buildQuery({
@@ -255,15 +273,15 @@ export default function AppShell() {
         panelBKind: panelBFilename ? (isReaderFilename(panelBFilename) ? "reader" : "note") : null,
         split: split ? "1" : null,
         focus: opts?.focus ? "1" : null,
+        from,
       })
     );
   }
 
   // Monta a URL de uma tela fora do editor (biblioteca/tag/tema/recentes/
   // favoritos/galeria Calibre) — usado pelos botões de navegação da sidebar/
-  // Homepage e por "Voltar" (via previousViewHrefRef, guardado como string
-  // pronta em vez de HomeView justamente pra poder reusar esta função só nos
-  // pontos que navegam PRA uma tela nova, não pra restaurar uma antiga).
+  // Homepage e por openNoteInPanel (via currentHref(), pro "?from=" de quem
+  // abre uma nota a partir daqui).
   function hrefForView(view: Exclude<HomeView, { kind: "editor" }>): string {
     switch (view.kind) {
       case "library":
@@ -1043,17 +1061,18 @@ export default function AppShell() {
   // editor, já que abrir uma nota faz sentido a partir de qualquer tela
   // (biblioteca, lista de tema, etc.).
   function openNoteInPanel(filename: string): "a" | "b" {
-    // Só atualiza a "página anterior" ao vir de fora do editor — trocar de
-    // nota enquanto já se está no editor não deve mexer no destino do "Voltar".
-    if (homeView.kind !== "editor") previousViewHrefRef.current = currentHref();
+    // "from" só é recalculado ao vir de FORA do editor — trocar de nota
+    // enquanto já se está no editor preserva o "from" que já está na URL
+    // atual (mesmo comportamento de antes com o ref, ver previousViewHref).
+    const from = homeView.kind !== "editor" ? currentHref() : searchParams.get("from");
     if (!splitMode) {
-      router.push(hrefForItem(filename));
+      router.push(hrefForItem(filename, { from }));
       setFocusedPanel("a");
       return "a";
     }
     const target: "a" | "b" = panelB === null ? "b" : panelA === null ? "a" : focusedPanel;
-    if (target === "a") router.push(hrefForItem(filename, { panelB, split: true }));
-    else router.push(hrefForItem(panelA ?? filename, { panelB: filename, split: true }));
+    if (target === "a") router.push(hrefForItem(filename, { panelB, split: true, from }));
+    else router.push(hrefForItem(panelA ?? filename, { panelB: filename, split: true, from }));
     setFocusedPanel(target);
     return target;
   }
@@ -1118,7 +1137,7 @@ export default function AppShell() {
     // (/notes/ e /reader/ sempre exigem um filename), então volta pra tela
     // anterior — mesma saída de "fechar o último item aberto".
     if (panelB) router.push(hrefForItem(panelB));
-    else router.push(previousViewHrefRef.current || "/");
+    else router.push(previousViewHref());
     setFocusedPanel("a");
   }
 
@@ -1206,7 +1225,7 @@ export default function AppShell() {
       // senão volta pra tela anterior — apagar o item de A não pode deixar a
       // URL apontando pro filename que acabou de ser excluído.
       if (splitMode && panelB && panelB !== filename) router.push(hrefForItem(panelB));
-      else router.push(previousViewHrefRef.current || "/");
+      else router.push(previousViewHref());
     } else if (isInB && panelA) {
       router.push(hrefForItem(panelA));
     }
@@ -1635,6 +1654,32 @@ export default function AppShell() {
     return null;
   }
 
+  // Cria a nota "Fichamento — <origem>" a partir dos destaques/comentários de
+  // uma nota ou livro (ver botões novos em BookCommentsPanel.tsx) — mesma
+  // rota de handleCreateNoteFromLink, mas com conteúdo inicial pronto e,
+  // quando a origem tinha tags, copiando-as pra nota nova logo em seguida.
+  async function handleCreateDerivedNote(params: { title: string; content: string; tags: string[] }): Promise<string | null> {
+    const res = await vaultFetch("/api/note/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: params.title, content: params.content }),
+    });
+    const data = await res.json();
+    if (!data.filename) return null;
+
+    if (params.tags.length > 0) {
+      await vaultFetch("/api/note/tags", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: data.filename, tags: params.tags }),
+      });
+    }
+
+    fetchNoteTargets();
+    fetchLibraryData();
+    return data.filename;
+  }
+
   // Abre o menu "+" (Nota em branco / Importar) ancorado no botão que disparou.
   // "up-left" (usado pelo FAB no canto inferior direito da tela) cresce a
   // partir do canto superior-esquerdo do gatilho, pra não nascer fora da tela.
@@ -1920,7 +1965,7 @@ export default function AppShell() {
             lista de tag ou "todas as notas") — só aparece dentro do editor. */}
         {homeView.kind === "editor" && (
           <button
-            onClick={() => router.push(previousViewHrefRef.current || "/")}
+            onClick={() => router.push(previousViewHref())}
             className="toolbar-link"
             title="Voltar"
             style={{
@@ -2547,6 +2592,7 @@ export default function AppShell() {
           onNoteFontChange={handleNoteFontChange}
           onToggleNoteFontOverride={handleToggleNoteFontOverride}
           onCreateNoteFromLink={handleCreateNoteFromLink}
+          onCreateDerivedNote={handleCreateDerivedNote}
           focusMode={readingFocusMode}
           onToggleFocusMode={toggleReadingFocusMode}
         />
@@ -2580,6 +2626,7 @@ export default function AppShell() {
               onNoteFontChange={handleNoteFontChange}
               onToggleNoteFontOverride={handleToggleNoteFontOverride}
               onCreateNoteFromLink={handleCreateNoteFromLink}
+              onCreateDerivedNote={handleCreateDerivedNote}
             />
           </>
         )}

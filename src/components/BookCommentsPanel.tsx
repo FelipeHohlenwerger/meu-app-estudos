@@ -7,14 +7,29 @@ import { calloutIcons } from "@/lib/livePreview";
 import { calloutColors } from "@/lib/colors";
 import { useVault } from "@/lib/vaultContext";
 
-type BookComment = {
+// Exportado: NotePanel.tsx usa esse mesmo tipo pra guardar `generalComments`
+// (ver onCommentsChanged abaixo) — este componente é a única fonte de
+// verdade pra esses dados, então não faz sentido duplicar o tipo lá.
+export type BookComment = {
   id: number;
   tipo: string;
   comment: string;
+  // true só pros "auto-contidos" de EPUB (ver anchorCfi abaixo) — os
+  // placeholders ancorados de .md (anchored=1, sem anchorCfi) nunca chegam
+  // até aqui, já ficam de fora no filtro do fetch (ver useEffect abaixo).
+  // NotePanel.tsx usa este campo pra separar comentário GERAL de verdade
+  // (anchored=false) dos auto-contidos de EPUB ao montar o PDF de destaques
+  // de nota (que já cobre os auto-contidos de outro jeito, via viewerKind).
+  anchored: boolean;
   // Só preenchidos pra comentários ancorados "auto-contidos" de EPUB
   // (gerados pelas ações de IA) — ver vaultIndex.ts (migração v10).
   anchorCfi?: string | null;
   anchorText?: string | null;
+  // Página (PDF) ou rótulo de capítulo (EPUB) no momento da criação — NULL
+  // pra comentários criados antes dessas colunas existirem. Ver
+  // exportBookComments.ts/fichamento.ts (usados por NotePanel.tsx).
+  page?: number | null;
+  chapterLabel?: string | null;
 };
 
 // Comentário ancorado a um trecho de texto da própria nota .md — o conteúdo
@@ -61,6 +76,35 @@ type Props = {
   // "clicar fora" quando o "fora" é em cima do próprio livro. Mesma lógica de
   // mudança-de-valor do autoComposeTrigger acima, não o valor em si.
   closePickerTrigger?: number;
+  // Página do PDF ou rótulo do capítulo do EPUB sendo exibido AGORA — só um
+  // dos dois é passado por vez (conforme o tipo de visualizador aberto em
+  // NotePanel.tsx). Gravado junto com o comentário no momento da criação,
+  // pra servir de referência de origem na exportação/"Fichamento" (ver
+  // exportBookComments.ts/fichamento.ts) — não editável depois.
+  currentPage?: number;
+  currentChapterLabel?: string;
+  // Disparado toda vez que a lista de comentários gerais (+ ancorados
+  // "auto-contidos" de EPUB) deste painel muda — fetch inicial, criar,
+  // editar ou apagar. NotePanel.tsx usa isso como ÚNICA fonte pro seu
+  // próprio `generalComments` (usado por exportar/"Fichamento"), em vez de
+  // ter um fetch independente próprio — dois fetches separados da mesma
+  // coisa é exatamente o que causava o bug de exportação "esquecendo"
+  // comentários recém-criados sem fechar/reabrir o painel primeiro.
+  onCommentsChanged?: (comments: BookComment[]) => void;
+  // Botões de exportar/criar nota, logo abaixo de "+ Novo comentário" — só
+  // um par é passado por vez: onExportHighlights/onCreateNoteFromHighlights
+  // (contexto de nota .md, junto com `anchoredComments`) OU
+  // onExportComments/onCreateNoteFromComments (contexto de livro). Ver
+  // NotePanel.tsx (handleExportHighlights/handleCreateNoteFromHighlights/
+  // handleExportBookComments/handleCreateNoteFromComments).
+  onExportHighlights?: () => void;
+  onCreateNoteFromHighlights?: () => void;
+  // Se há algo pra exportar/criar nota no contexto de NOTA — a lista de
+  // destaques puros (sem comentário) não é conhecida por este painel, só por
+  // NotePanel.tsx, daí vir como prop em vez de calculada aqui.
+  canExportNote?: boolean;
+  onExportComments?: () => void;
+  onCreateNoteFromComments?: () => void;
 };
 
 function EditIcon() {
@@ -90,6 +134,22 @@ function TipoIcon({ tipo }: { tipo: string }) {
   );
 }
 
+// Estilo dos botões de exportar/criar nota — mesma forma do "+ Novo
+// comentário" acima, só um pouco mais discreto (texto menor, cor
+// secundária) pra não competir visualmente com a ação principal do painel.
+function actionButtonStyle(enabled: boolean) {
+  return {
+    width: "100%",
+    padding: "0.45rem",
+    border: "1px solid var(--panel-border)",
+    borderRadius: "6px",
+    background: "transparent",
+    color: enabled ? "var(--text-muted)" : "var(--panel-border)",
+    cursor: enabled ? "pointer" : "default",
+    fontSize: "0.78rem",
+  } as const;
+}
+
 type MergedItem =
   | { kind: "anchored"; id: number; tipo: string; texto: string; comentario: string }
   | { kind: "general"; id: number; tipo: string; comment: string; anchorCfi?: string | null; anchorText?: string | null };
@@ -114,11 +174,24 @@ export default function BookCommentsPanel({
   scrollToId,
   autoComposeTrigger,
   closePickerTrigger,
+  currentPage,
+  currentChapterLabel,
+  onExportHighlights,
+  onCreateNoteFromHighlights,
+  canExportNote,
+  onExportComments,
+  onCreateNoteFromComments,
+  onCommentsChanged,
 }: Props) {
   const { vaultFetch } = useVault();
   const [comments, setComments] = useState<BookComment[]>([]);
   const [pickerAnchor, setPickerAnchor] = useState<{ x: number; y: number } | null>(null);
   const [pendingTipo, setPendingTipo] = useState<string | null>(null);
+  // Comentário GERAL sendo editado (tipo + texto) — null quando o picker/
+  // modal estão abertos pra CRIAR um novo. Só se aplica a comentários
+  // gerais: ancorados de .md continuam editáveis só pelo próprio texto da
+  // nota (onEditAnchored), que não passa por este estado.
+  const [editingComment, setEditingComment] = useState<BookComment | null>(null);
   const [highlightedId, setHighlightedId] = useState<number | null>(null);
   const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const newCommentButtonRef = useRef<HTMLButtonElement>(null);
@@ -168,14 +241,16 @@ export default function BookCommentsPanel({
         : vaultFetch(`/api/book-comments?filename=${encodeURIComponent(filename)}`);
     request
       .then((res) => res.json())
-      .then((data) =>
+      .then((data) => {
         // Placeholders ancorados de .md (anchored=1, sem anchorCfi) ficam de
         // fora — conteúdo real vem da prop anchoredComments. Ancorados
         // "auto-contidos" de EPUB (anchored=1, COM anchorCfi) entram
         // normalmente aqui, já que carregam tipo/comment reais.
-        setComments((data.comments ?? []).filter((c: BookComment & { anchored?: boolean }) => !c.anchored || c.anchorCfi))
-      );
-  }, [filename, calibreId, vaultFetch]);
+        const filtered = (data.comments ?? []).filter((c: BookComment & { anchored?: boolean }) => !c.anchored || c.anchorCfi);
+        setComments(filtered);
+        onCommentsChanged?.(filtered);
+      });
+  }, [filename, calibreId, vaultFetch, onCommentsChanged]);
 
   useEffect(() => {
     if (!open || scrollToId == null) return;
@@ -196,21 +271,57 @@ export default function BookCommentsPanel({
         ? await fetch("/api/calibre/book-comments", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ calibreId, tipo, comment: texto }),
+            body: JSON.stringify({ calibreId, tipo, comment: texto, page: currentPage, chapterLabel: currentChapterLabel }),
           })
         : await vaultFetch("/api/book-comments", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filename, tipo, comment: texto }),
+            body: JSON.stringify({ filename, tipo, comment: texto, page: currentPage, chapterLabel: currentChapterLabel }),
           });
     const data = await res.json();
-    if (data.comment) setComments((prev) => [...prev, data.comment]);
+    if (data.comment) {
+      const next = [...comments, data.comment];
+      setComments(next);
+      onCommentsChanged?.(next);
+    }
+  }
+
+  // Altera tipo + texto de um comentário GERAL já existente (picker de tipo
+  // reaberto com a mesma UI de "+ Novo comentário", ver botão "Editar" no
+  // card abaixo) — nunca usado pra comentários ancorados de .md, que seguem
+  // só editáveis pelo próprio texto (onEditAnchored).
+  async function handleEditComment(texto: string) {
+    const tipo = pendingTipo;
+    const id = editingComment?.id;
+    setPendingTipo(null);
+    setEditingComment(null);
+    if (!tipo || id == null) return;
+    const res =
+      calibreId !== undefined
+        ? await fetch(`/api/calibre/book-comments/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tipo, comment: texto }),
+          })
+        : await vaultFetch(`/api/book-comments/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tipo, comment: texto }),
+          });
+    const data = await res.json();
+    if (data.comment) {
+      const next = comments.map((c) => (c.id === id ? data.comment : c));
+      setComments(next);
+      onCommentsChanged?.(next);
+    }
   }
 
   async function handleDelete(id: number) {
     if (calibreId !== undefined) await fetch(`/api/calibre/book-comments/${id}`, { method: "DELETE" });
     else await vaultFetch(`/api/book-comments/${id}`, { method: "DELETE" });
-    setComments((prev) => prev.filter((c) => c.id !== id));
+    const next = comments.filter((c) => c.id !== id);
+    setComments(next);
+    onCommentsChanged?.(next);
   }
 
   const merged: MergedItem[] = [
@@ -301,6 +412,25 @@ export default function BookCommentsPanel({
             + Novo comentário
           </button>
 
+          {(onExportHighlights || onExportComments) && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginBottom: "1rem" }}>
+              <button
+                onClick={onExportHighlights ?? onExportComments}
+                disabled={onExportHighlights ? !canExportNote : merged.length === 0}
+                style={actionButtonStyle((onExportHighlights ? canExportNote : merged.length > 0) ?? false)}
+              >
+                {onExportHighlights ? "Exportar destaques e comentários" : "Exportar comentários"}
+              </button>
+              <button
+                onClick={onCreateNoteFromHighlights ?? onCreateNoteFromComments}
+                disabled={onExportHighlights ? !canExportNote : merged.length === 0}
+                style={actionButtonStyle((onExportHighlights ? canExportNote : merged.length > 0) ?? false)}
+              >
+                {onCreateNoteFromHighlights ? "Criar nota a partir dos destaques" : "Criar nota a partir dos comentários"}
+              </button>
+            </div>
+          )}
+
           {merged.length === 0 ? (
             <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>Nenhum comentário ainda.</p>
           ) : (
@@ -337,6 +467,35 @@ export default function BookCommentsPanel({
                         <button
                           onClick={() => onEditAnchored?.(item.id)}
                           title="Editar comentário"
+                          style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted)", display: "flex", alignItems: "center", padding: "2px" }}
+                        >
+                          <EditIcon />
+                        </button>
+                      )}
+                      {item.kind === "general" && (
+                        <button
+                          onClick={() => {
+                            // Vai direto pro CommentModal (sem passar pelo
+                            // CalloutSlashMenu externo primeiro, ao contrário
+                            // de "+ Novo comentário") — o seletor de tipo
+                            // agora mora DENTRO do modal (ver
+                            // CommentModal.tsx), que já fica centralizado na
+                            // tela, então não tem posição de botão nenhuma
+                            // pra calcular/acertar aqui.
+                            setEditingComment({
+                              id: item.id,
+                              tipo: item.tipo,
+                              comment: item.comment,
+                              // Não usado por handleEditComment (só envia
+                              // tipo/comment) — presente só pra satisfazer o
+                              // tipo BookComment.
+                              anchored: false,
+                              anchorCfi: item.anchorCfi,
+                              anchorText: item.anchorText,
+                            });
+                            setPendingTipo(item.tipo);
+                          }}
+                          title="Editar tipo/texto do comentário"
                           style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted)", display: "flex", alignItems: "center", padding: "2px" }}
                         >
                           <EditIcon />
@@ -381,6 +540,9 @@ export default function BookCommentsPanel({
         </>
       )}
 
+      {/* Só usado por "+ Novo comentário" — editar um já existente vai direto
+          pro CommentModal (ver botão "Editar" acima), cujo seletor de tipo
+          embutido dispensa esse picker externo. */}
       {pickerAnchor && (
         <CalloutSlashMenu
           x={pickerAnchor.x}
@@ -398,7 +560,17 @@ export default function BookCommentsPanel({
       )}
 
       {pendingTipo && (
-        <CommentModal tipo={pendingTipo} onConfirm={handleConfirmComment} onCancel={() => setPendingTipo(null)} />
+        <CommentModal
+          tipo={pendingTipo}
+          initialText={editingComment?.comment}
+          tipoOptions={Object.entries(calloutColors).filter(([t]) => t !== "ia")}
+          onTipoChange={setPendingTipo}
+          onConfirm={editingComment ? handleEditComment : handleConfirmComment}
+          onCancel={() => {
+            setPendingTipo(null);
+            setEditingComment(null);
+          }}
+        />
       )}
       </aside>
     </>

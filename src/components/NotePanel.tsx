@@ -42,13 +42,14 @@ import CoverMenu from "@/components/CoverMenu";
 import TagField, { TagChips } from "@/components/TagField";
 import { StarIcon } from "@/components/NoteCard";
 import PdfViewer, { PDF_ZOOM_LEVELS, type PdfViewerHandle } from "@/components/PdfViewer";
-import EpubViewer, { type EpubViewerHandle, type TocEntry } from "@/components/EpubViewer";
+import EpubViewer, { flattenToc, type EpubViewerHandle, type TocEntry } from "@/components/EpubViewer";
 import EpubTocDrawer from "@/components/EpubTocDrawer";
-import BookCommentsPanel from "@/components/BookCommentsPanel";
+import BookCommentsPanel, { type BookComment } from "@/components/BookCommentsPanel";
 import LinkBookModal from "@/components/LinkBookModal";
 import ChatPanel from "@/components/ChatPanel";
 import AiStatusBadge from "@/components/AiStatusBadge";
 import TranslatePanel from "@/components/TranslatePanel";
+import DictionaryPanel from "@/components/DictionaryPanel";
 import { extractBlockRefs, findBlockMarkers } from "@/lib/wikiLinkSyntax";
 import {
   buildImageSyntax,
@@ -61,9 +62,12 @@ import {
   type ImageWrap,
 } from "@/lib/imageSyntax";
 import { extractHighlightEntries, generateHighlightsPdf } from "@/lib/exportHighlights";
+import { generateBookCommentsPdf } from "@/lib/exportBookComments";
+import { buildNoteFichamento, buildBookFichamento } from "@/lib/fichamento";
 import { requestAiAction, type AiAction } from "@/lib/aiActions";
 import { requestTranslation } from "@/lib/translate";
-import { calloutColorsPalette } from "@/lib/colors";
+import { requestDictionaryLookup, type DictionaryEntry } from "@/lib/dictionary";
+import { calloutColorsPalette, underlineColors } from "@/lib/colors";
 import { uploadAndSetCover, removeCover } from "@/lib/coverActions";
 import { useVault } from "@/lib/vaultContext";
 import type { CalibreBook } from "@/lib/calibreLibrary";
@@ -309,6 +313,10 @@ type NotePanelProps = {
   onNoteFontChange: (filename: string | null, font: NoteFontId) => void;
   onToggleNoteFontOverride: (filename: string, checked: boolean, currentFont: NoteFontId) => void;
   onCreateNoteFromLink: (title: string) => Promise<string | null>;
+  // Cria a nota "Fichamento — <origem>" a partir dos destaques/comentários
+  // deste painel (ver handleCreateNoteFromHighlights/handleCreateNoteFromComments
+  // abaixo) — devolve o filename criado, ou null em caso de erro.
+  onCreateDerivedNote: (params: { title: string; content: string; tags: string[] }) => Promise<string | null>;
   // Modo foco de leitura (só faz sentido pra PDF/EPUB, ver viewerKind) — o
   // estado mora em page.tsx (precisa saber fechar a tela dividida ao entrar,
   // mesmo espírito de graphFullscreen); este painel só liga/desliga.
@@ -363,6 +371,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     onNoteFontChange,
     onToggleNoteFontOverride,
     onCreateNoteFromLink,
+    onCreateDerivedNote,
     onFavoriteChanged,
     focusMode,
     onToggleFocusMode,
@@ -436,6 +445,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
   function openTranslatePanel(texto: string) {
     setShowBookComments(false);
     setShowChat(false);
+    closeDictionaryPanel();
     setShowTranslate(true);
     runTranslate(texto);
   }
@@ -457,12 +467,67 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       if (translateDebounceRef.current) clearTimeout(translateDebounceRef.current);
     };
   }, []);
+
+  // Painel lateral de dicionário (ver DictionaryPanel.tsx) — mesmo padrão do
+  // de tradução logo acima (aberto até fechar manualmente, atualiza sozinho a
+  // cada nova seleção com debounce de 400ms), mutuamente exclusivo com
+  // tradução/comentários/chat.
+  const [showDictionary, setShowDictionary] = useState(false);
+  const [dictionaryState, setDictionaryState] = useState<{
+    status: "loading" | "done" | "error";
+    entry?: DictionaryEntry;
+    message?: string;
+  } | null>(null);
+  const dictionaryDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Free Dictionary API (inglês) ou Gemini (português/outro idioma) — decisão
+  // inteira no servidor, ver dictionaryServer.ts.
+  async function runDictionaryLookup(palavra: string) {
+    if (dictionaryDebounceRef.current) clearTimeout(dictionaryDebounceRef.current);
+    setDictionaryState({ status: "loading" });
+    try {
+      const entry = await requestDictionaryLookup(palavra);
+      setDictionaryState({ status: "done", entry });
+    } catch (err) {
+      setDictionaryState({ status: "error", message: err instanceof Error ? err.message : "Erro ao consultar o dicionário" });
+    }
+  }
+  function openDictionaryPanel(texto: string) {
+    setShowBookComments(false);
+    setShowChat(false);
+    closeTranslatePanel();
+    setShowDictionary(true);
+    runDictionaryLookup(texto);
+  }
+  function closeDictionaryPanel() {
+    setShowDictionary(false);
+    setDictionaryState(null);
+    if (dictionaryDebounceRef.current) clearTimeout(dictionaryDebounceRef.current);
+  }
+  function scheduleDictionaryUpdate(texto: string) {
+    if (!showDictionary) return;
+    if (dictionaryDebounceRef.current) clearTimeout(dictionaryDebounceRef.current);
+    dictionaryDebounceRef.current = setTimeout(() => runDictionaryLookup(texto), 400);
+  }
+  useEffect(() => {
+    return () => {
+      if (dictionaryDebounceRef.current) clearTimeout(dictionaryDebounceRef.current);
+    };
+  }, []);
+  // Ponto único chamado por toda seleção de texto (editor CodeMirror, PDF,
+  // EPUB) — cada painel decide sozinho se reage (só se já estiver aberto, ver
+  // scheduleTranslateUpdate/scheduleDictionaryUpdate acima).
+  function handleSelectionChange(texto: string) {
+    scheduleTranslateUpdate(texto);
+    scheduleDictionaryUpdate(texto);
+  }
+
   function toggleBookComments() {
     setShowBookComments((prev) => {
       const next = !prev;
       if (next) {
         setShowChat(false);
         closeTranslatePanel();
+        closeDictionaryPanel();
       }
       return next;
     });
@@ -473,6 +538,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       if (next) {
         setShowBookComments(false);
         closeTranslatePanel();
+        closeDictionaryPanel();
       }
       return next;
     });
@@ -861,6 +927,17 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     setTocOpen(false);
   }, [filename]);
 
+  // Rótulo do capítulo atual do EPUB, pra guardar como referência de origem
+  // junto do comentário (ver BookCommentsPanel.tsx) — mesma resolução já
+  // usada pra alimentar `resolveSpineIndex` do EpubTocDrawer: acha, entre as
+  // entradas achatadas do sumário, qual delas resolve pro spine index atual.
+  function currentEpubChapterLabel(): string | undefined {
+    if (epubCurrentSpineIndex == null) return undefined;
+    const flat = flattenToc(epubToc);
+    const match = flat.find((entry) => epubViewerRef.current?.getSpineIndexForHref(entry.href) === epubCurrentSpineIndex);
+    return match?.label;
+  }
+
   function handleCopyPositionLink() {
     if (viewerKind === "pdf" && filename) {
       const label = isCalibreBook ? calibreBook?.title ?? filename : filename;
@@ -892,6 +969,20 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       .filter((c) => c.id !== undefined)
       .map((c) => ({ id: c.id!, tipo: c.tipo, texto: c.anchorText, comentario: c.comentario }));
   }, [filename, content, viewerKind]);
+
+  // Comentários gerais (+ ancorados "auto-contidos" de EPUB) — usados pra
+  // exportar PDF e criar a nota "Fichamento" (ver Parte 3 do plano). Notas
+  // .md usam só os itens com anchored===false (os ancorados de nota já vêm
+  // do texto via highlightEntries/anchoredComments acima); livros usam a
+  // lista inteira, já em ordem de criação. NÃO tem fetch próprio — o
+  // `<BookCommentsPanel>` abaixo já busca e mantém essa mesma lista pra
+  // exibição própria; reportamos aqui via onCommentsChanged em vez de
+  // duplicar o fetch, porque dois estados independentes da mesma coisa
+  // (o de exibição do painel e um "cópia" aqui) é exatamente o que causava
+  // export/"Fichamento" esquecendo comentários recém-criados sem fechar e
+  // reabrir o painel — o painel atualizava a própria lista na hora, mas essa
+  // cópia só recarregava ao trocar de arquivo ou fechar/abrir o painel.
+  const [generalComments, setGeneralComments] = useState<BookComment[]>([]);
 
   async function saveNote(filenameToSave: string, contentToSave: string) {
     setStatus("Salvando...");
@@ -1015,9 +1106,55 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     removeCover(vaultFetch, filename).then(() => onLibraryChanged());
   }
 
+  // Comentários gerais de nota .md (sem trecho ancorado) — os ancorados já
+  // vêm do texto via highlightEntries/anchoredComments, então ficam de fora
+  // daqui pra não duplicar. Ver Parte 3 do plano.
+  const noteGeneralComments = useMemo(
+    () => generalComments.filter((c) => !c.anchored).map((c) => ({ tipo: c.tipo, comment: c.comment })),
+    [generalComments]
+  );
+  const canExportNote = highlightEntries.length > 0 || noteGeneralComments.length > 0;
+
   function handleExportHighlights() {
-    if (!filename || highlightEntries.length === 0) return;
-    generateHighlightsPdf(stripMdExtension(filename), highlightEntries);
+    if (!filename || !canExportNote) return;
+    generateHighlightsPdf(stripMdExtension(filename), highlightEntries, noteGeneralComments);
+  }
+
+  async function handleCreateNoteFromHighlights() {
+    if (!filename || !canExportNote) return;
+    const sourceTitle = stripMdExtension(filename);
+    const noteContent = buildNoteFichamento(sourceTitle, highlightEntries, noteGeneralComments);
+    const newFilename = await onCreateDerivedNote({
+      title: `Fichamento — ${sourceTitle}`,
+      content: noteContent,
+      tags: noteTags,
+    });
+    if (newFilename) onFilenameChange(newFilename);
+  }
+
+  // Comentários de livro (gerais + ancorados "auto-contidos" de EPUB), já na
+  // ordem de criação — usados tanto pra exportar em PDF quanto pra criar a
+  // nota "Fichamento" a partir deles.
+  function bookCommentsForExport() {
+    return generalComments.map((c) => ({ tipo: c.tipo, texto: c.comment, page: c.page, chapterLabel: c.chapterLabel }));
+  }
+
+  function bookTitleForFichamento(): string {
+    return isCalibreBook ? calibreBook?.title ?? "" : filename ? stripMdExtension(filename) : "";
+  }
+
+  function handleExportBookComments() {
+    if (generalComments.length === 0) return;
+    generateBookCommentsPdf(bookTitleForFichamento(), bookCommentsForExport());
+  }
+
+  async function handleCreateNoteFromComments() {
+    if (generalComments.length === 0) return;
+    const bookTitle = bookTitleForFichamento();
+    const noteContent = buildBookFichamento(bookTitle, bookCommentsForExport());
+    const tags = isCalibreBook ? calibreBook?.subjects ?? [] : noteTags;
+    const newFilename = await onCreateDerivedNote({ title: `Fichamento — ${bookTitle}`, content: noteContent, tags });
+    if (newFilename) onFilenameChange(newFilename);
   }
 
   function openFontSizePopup(rect: DOMRect) {
@@ -1716,6 +1853,16 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     openTranslatePanel(texto);
   }
 
+  function handleDictionary() {
+    const view = editorViewRef.current;
+    if (!view || !menuPos) return;
+    const sel = view.state.selection.main;
+    if (sel.empty) return;
+    const texto = view.state.doc.sliceString(sel.from, sel.to);
+    setMenuPos(null);
+    openDictionaryPanel(texto);
+  }
+
   function insertCalloutSlashCommand() {
     const view = editorViewRef.current;
     if (!view) return;
@@ -1818,11 +1965,11 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         setEditingHighlight(null);
         return;
       }
-      // Acompanha qualquer seleção nova pro painel de tradução (se estiver
-      // aberto) — antes das checagens de sobreposição abaixo, já que a
-      // tradução deve seguir a seleção mesmo em cima de um trecho já
-      // marcado/comentado.
-      scheduleTranslateUpdate(update.state.doc.sliceString(sel.from, sel.to));
+      // Acompanha qualquer seleção nova pros painéis de tradução/dicionário
+      // (se algum estiver aberto) — antes das checagens de sobreposição
+      // abaixo, já que ambos devem seguir a seleção mesmo em cima de um
+      // trecho já marcado/comentado.
+      handleSelectionChange(update.state.doc.sliceString(sel.from, sel.to));
       const overlapsHighlight = findHighlightAt(update.view, sel.from) || findHighlightAt(update.view, sel.to);
       const overlapsComment = findCommentAt(update.view, sel.from) || findCommentAt(update.view, sel.to);
       if (overlapsHighlight || overlapsComment) {
@@ -2631,27 +2778,6 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                       Chat
                     </button>
                   )}
-                  {!isMobile && (
-                    <button
-                      className="toolbar-link"
-                      title={highlightEntries.length === 0 ? "Nenhum destaque nesta nota" : "Exportar destaques em PDF"}
-                      disabled={highlightEntries.length === 0}
-                      onClick={handleExportHighlights}
-                      style={{
-                        background: "transparent",
-                        border: "1px solid var(--panel-border)",
-                        borderRadius: "4px",
-                        color: highlightEntries.length === 0 ? "var(--panel-border)" : "var(--text-muted)",
-                        cursor: highlightEntries.length === 0 ? "default" : "pointer",
-                        padding: "0.3rem 0.6rem",
-                        fontSize: "0.85rem",
-                        flexShrink: 0,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      Exportar destaques
-                    </button>
-                  )}
                   {isMobile && (
                     <button
                       onClick={() => setMobileToolsOpen(true)}
@@ -2741,7 +2867,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                     onZoomChange={setPdfZoomPercent}
                     onError={setPdfViewerError}
                     onOpenTranslate={openTranslatePanel}
-                    onSelectionChange={scheduleTranslateUpdate}
+                    onOpenDictionary={openDictionaryPanel}
+                    onSelectionChange={handleSelectionChange}
                   />
                 )
               )}
@@ -2787,7 +2914,8 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                     onTocLoaded={setEpubToc}
                     onContentInteraction={() => setCloseCommentPickerTrigger((t) => t + 1)}
                     onOpenTranslate={openTranslatePanel}
-                    onSelectionChange={scheduleTranslateUpdate}
+                    onOpenDictionary={openDictionaryPanel}
+                    onSelectionChange={handleSelectionChange}
                   />
                 )
               )}
@@ -3014,6 +3142,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onComment={editingHighlight ? undefined : startComment}
           onAiAction={editingHighlight ? undefined : handleAiAction}
           onTranslate={editingHighlight ? undefined : handleTranslate}
+          onDictionary={editingHighlight ? undefined : handleDictionary}
           onClose={() => {
             setMenuPos(null);
             setEditingHighlight(null);
@@ -3156,7 +3285,14 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
       )}
 
       {commentDraft && (
-        <CommentModal tipo={commentDraft.tipo} initialText={commentDraft.initialText} onConfirm={confirmComment} onCancel={() => setCommentDraft(null)} />
+        <CommentModal
+          tipo={commentDraft.tipo}
+          initialText={commentDraft.initialText}
+          tipoOptions={Object.entries(underlineColors)}
+          onTipoChange={(tipo) => setCommentDraft((prev) => (prev ? { ...prev, tipo } : prev))}
+          onConfirm={confirmComment}
+          onCancel={() => setCommentDraft(null)}
+        />
       )}
 
       {filename && (
@@ -3174,23 +3310,29 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
           onEditAnchored={handleEditAnchoredById}
           onDeleteAnchored={handleDeleteAnchoredById}
           scrollToId={scrollToCommentId}
+          currentPage={viewerKind === "pdf" ? pdfPageInput : undefined}
+          currentChapterLabel={viewerKind === "epub" ? currentEpubChapterLabel() : undefined}
+          onExportHighlights={!viewerKind ? handleExportHighlights : undefined}
+          onCreateNoteFromHighlights={!viewerKind ? handleCreateNoteFromHighlights : undefined}
+          canExportNote={canExportNote}
+          onExportComments={viewerKind ? handleExportBookComments : undefined}
+          onCreateNoteFromComments={viewerKind ? handleCreateNoteFromComments : undefined}
+          onCommentsChanged={setGeneralComments}
         />
       )}
 
-      {/* Botão flutuante de comentários — no mobile cobre qualquer conteúdo
-          (nota ou visualizador), mesmo espírito de sempre: no desktop, notas
-          já têm o gatilho "Comentários" na linha de botões, mas o
-          visualizador PDF/EPUB (cabeçalho enxuto de propósito, ver Parte A)
-          não tem mais essa linha — por isso o botão também aparece no
-          desktop quando `viewerKind`. Pra `viewerKind`, abre DIRETO no
-          composer de comentário geral (autoComposeTrigger), não só a lista —
-          pra nota comum no mobile, mantém o comportamento de sempre (só abre
-          o painel). */}
-      {filename && !showBookComments && (isMobile || viewerKind) && (
+      {/* Botão flutuante de comentários — cobre qualquer conteúdo (nota ou
+          visualizador), em mobile e desktop: além do gatilho "Comentários" na
+          linha de botões (nota, desktop) e do item "Comentários" da folha
+          "Mais opções" (mobile/viewerKind), esse botão abre o painel já
+          direto no composer de novo comentário (autoComposeTrigger), sem
+          precisar de um segundo clique em "+ Novo comentário" — mesmo
+          comportamento pra nota .md e pra livro. */}
+      {filename && !showBookComments && (
         <button
           onClick={() => {
             toggleBookComments();
-            if (viewerKind) setCommentComposeTrigger((t) => t + 1);
+            setCommentComposeTrigger((t) => t + 1);
           }}
           title="Comentários"
           style={{
@@ -3340,24 +3482,6 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
                 ))}
               </div>
             )}
-            {!viewerKind && (
-              <button
-                className="toolbar-link"
-                disabled={highlightEntries.length === 0}
-                onClick={() => {
-                  setMobileToolsOpen(false);
-                  handleExportHighlights();
-                }}
-                style={{
-                  ...mobileToolSheetButtonStyle,
-                  color: highlightEntries.length === 0 ? "var(--panel-border)" : "var(--foreground)",
-                  cursor: highlightEntries.length === 0 ? "default" : "pointer",
-                }}
-              >
-                Exportar destaques
-              </button>
-            )}
-
             {!viewerKind && selectedImage && (
               <div style={{ borderTop: "1px solid var(--panel-border)", marginTop: "0.4rem", paddingTop: "0.75rem" }}>
                 <ImageControlPanel
@@ -3410,6 +3534,15 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
         translatedText={translateState?.translatedText}
         detectedSourceLanguage={translateState?.detectedSourceLanguage}
         message={translateState?.message}
+      />
+
+      <DictionaryPanel
+        open={showDictionary}
+        onClose={closeDictionaryPanel}
+        status={dictionaryState?.status ?? null}
+        entry={dictionaryState?.entry}
+        message={dictionaryState?.message}
+        onSelectSynonym={runDictionaryLookup}
       />
 
       <input
