@@ -126,7 +126,7 @@ export default function DictionaryPanel({ open, onClose, status, entry, message,
                 )}
 
                 <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.75rem" }}>
-                  via {entry.source === "free-dictionary" ? "Free Dictionary" : "Gemini"}
+                  via {entry.source === "wiktionary" ? "Wiktionary" : "Gemini"}
                 </div>
               </>
             )}

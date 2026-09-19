@@ -479,7 +479,7 @@ const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function NotePanel
     message?: string;
   } | null>(null);
   const dictionaryDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Free Dictionary API (inglês) ou Gemini (português/outro idioma) — decisão
+  // Wiktionary (pt/en) ou Gemini (fallback quando não encontrada) — decisão
   // inteira no servidor, ver dictionaryServer.ts.
   async function runDictionaryLookup(palavra: string) {
     if (dictionaryDebounceRef.current) clearTimeout(dictionaryDebounceRef.current);

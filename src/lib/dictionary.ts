@@ -1,7 +1,7 @@
 // Chamada client-side compartilhada por NotePanel.tsx (.md), PdfViewer.tsx e
 // EpubViewer.tsx pra consulta de dicionário — mesmo espírito de translate.ts
-// (arquivo fino, só chama a rota; a decisão Free Dictionary API vs. Gemini
-// mora inteira no servidor, ver dictionaryServer.ts).
+// (arquivo fino, só chama a rota; a decisão Wiktionary vs. Gemini mora
+// inteira no servidor, ver dictionaryServer.ts).
 export type DictionaryEntry = {
   word: string;
   language?: string;
@@ -10,7 +10,7 @@ export type DictionaryEntry = {
   definition: string;
   synonyms: string[];
   example?: string;
-  source: "free-dictionary" | "gemini";
+  source: "wiktionary" | "gemini";
 };
 
 export async function requestDictionaryLookup(palavra: string): Promise<DictionaryEntry> {
