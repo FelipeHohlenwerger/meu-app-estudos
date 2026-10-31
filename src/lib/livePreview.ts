@@ -1,7 +1,7 @@
 import { syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate, keymap } from "@codemirror/view";
-import { EditorState, RangeSetBuilder } from "@codemirror/state";
+import { EditorState, RangeSetBuilder, Text } from "@codemirror/state";
 import { WidgetType } from "@codemirror/view";
 import { StateEffect, StateField, Prec } from "@codemirror/state";
 import { parseWikiMatches, findBlockMarkers } from "@/lib/wikiLinkSyntax";
@@ -1119,16 +1119,71 @@ export function createWikiLinkKeymap(
 // Tab/Shift-Tab dentro de um item de lista aumenta/diminui o nível de
 // aninhamento — não existia nenhum atalho de Tab no editor antes disso (Tab
 // fora de uma lista continua sem fazer nada aqui, deixando o navegador tirar
-// o foco do editor, comportamento padrão). 4 espaços por nível: suficiente
-// pra ultrapassar o limiar de continuação do CommonMark tanto pra marcadores
-// "-"/"*" (2 colunas) quanto pra a maioria dos numerados ("1."/"99.", 3-4
-// colunas), então dispara o reconhecimento de aninhamento pelo parser de
-// forma confiável. A profundidade visual (padding-left/linha-guia, ver
-// buildListGuideStyle) vem da árvore de sintaxe, não da contagem de espaços
-// — então um Tab pode "não fazer nada visualmente" se não houver
-// item-irmão anterior pra aninhar sob; isso é o parser funcionando certo,
-// não um bug. Escopo: só a linha do cursor, sem indentar seleção múltipla.
-const LIST_TAB_INDENT = "    ";
+// o foco do editor, comportamento padrão).
+//
+// Versão anterior inseria sempre 4 espaços fixos por nível. Isso quebrava de
+// duas formas, ambas confirmadas testando o parser (@lezer/markdown) direto:
+// (1) apertar Tab duas vezes numa linha (8 espaços) sem que exista, na
+// árvore, um item aninhado de 2º nível já reconhecido sob o item anterior
+// fazia a linha "descolar" pra continuação de parágrafo do item anterior
+// (texto cru, sem ListMark novo); (2) Tab num item sem irmão anterior
+// (comentário antigo já previa isso como "no-op visual", mas o código
+// inseria os 4 espaços mesmo assim) virava bloco de código indentado. Os
+// dois casos produzem a oscilação relatada: a mesma tecla Tab, dependendo
+// do estado prévio da árvore, ora gera um ListMark novo (bullet renderiza),
+// ora não (linha crua com "-").
+//
+// Fix: em vez de somar um valor fixo, calcula a coluna exata onde o parser
+// reconhece um item aninhado — a "coluna de conteúdo" do item-irmão
+// anterior (onde o texto dele começa, depois do marcador + espaço) — e
+// define o recuo da linha atual pra ESSE valor exato, substituindo
+// qualquer recuo prévio (não soma). Isso sempre cai dentro da faixa que o
+// CommonMark reconhece como aninhamento válido, para qualquer marcador
+// ("-"/"*"/"1."/"99."), sem depender de tabs nem de uma contagem de espaços
+// arbitrária. Sem item-irmão anterior pra aninhar sob, Tab não faz nada
+// (mesmo comportamento documentado antes, agora garantido pelo código, não
+// só pelo comentário). Shift-Tab faz o inverso: recua a linha pra coluna do
+// marcador do item-pai (virando irmão dele, um nível acima). Escopo: só a
+// linha do cursor, sem indentar seleção múltipla.
+function enclosingListItem(view: EditorView, pos: number, side: -1 | 1 = -1): SyntaxNode | null {
+  let node: SyntaxNode | null = syntaxTree(view.state).resolveInner(pos, side);
+  while (node) {
+    if (node.name === "ListItem") return node;
+    node = node.parent;
+  }
+  return null;
+}
+
+// Pai imediato (item-lista) de `item`, pulando a List (Bullet/Ordered) que o
+// contém — null se `item` já está no nível mais alto (sem item-lista acima).
+function parentListItem(item: SyntaxNode): SyntaxNode | null {
+  let node: SyntaxNode | null = item.parent;
+  while (node) {
+    if (node.name === "ListItem") return node;
+    node = node.parent;
+  }
+  return null;
+}
+
+// Coluna (relativa ao início da linha) onde está o marcador de `item`, e
+// coluna onde o conteúdo dele começa (depois do marcador + espaço(s) que o
+// seguem) — essa segunda coluna é onde um item aninhado sob `item` deve
+// começar pra ser reconhecido como filho dele.
+function listMarkerColumns(item: SyntaxNode, doc: Text): { markCol: number; contentCol: number } | null {
+  const mark = item.getChild("ListMark");
+  if (!mark) return null;
+  const line = doc.lineAt(mark.from);
+  let contentEnd = mark.to;
+  while (contentEnd < line.to && doc.sliceString(contentEnd, contentEnd + 1) === " ") contentEnd++;
+  return { markCol: mark.from - line.from, contentCol: contentEnd - line.from };
+}
+
+function setLineIndent(view: EditorView, line: { from: number }, pos: number, currentLeadingLen: number, targetLen: number) {
+  view.dispatch({
+    changes: { from: line.from, to: line.from + currentLeadingLen, insert: " ".repeat(targetLen) },
+    selection: { anchor: Math.max(line.from, pos + (targetLen - currentLeadingLen)) },
+  });
+}
 
 export const listIndentKeymap = Prec.highest(
   keymap.of([
@@ -1136,12 +1191,15 @@ export const listIndentKeymap = Prec.highest(
       key: "Tab",
       run(view) {
         const pos = view.state.selection.main.head;
-        if (listItemDepthAt(view, pos) === 0) return false;
+        const curItem = enclosingListItem(view, pos);
+        if (!curItem) return false;
+        const prevItem = curItem.prevSibling;
+        if (!prevItem || prevItem.name !== "ListItem") return true; // sem irmão anterior pra aninhar sob — no-op, mas consome o Tab
+        const cols = listMarkerColumns(prevItem, view.state.doc);
+        if (!cols) return true;
         const line = view.state.doc.lineAt(pos);
-        view.dispatch({
-          changes: { from: line.from, insert: LIST_TAB_INDENT },
-          selection: { anchor: pos + LIST_TAB_INDENT.length },
-        });
+        const leadingLen = /^ */.exec(line.text)![0].length;
+        setLineIndent(view, line, pos, leadingLen, cols.contentCol);
         return true;
       },
     },
@@ -1149,15 +1207,14 @@ export const listIndentKeymap = Prec.highest(
       key: "Shift-Tab",
       run(view) {
         const pos = view.state.selection.main.head;
-        if (listItemDepthAt(view, pos) === 0) return false;
+        const curItem = enclosingListItem(view, pos);
+        if (!curItem) return false;
+        const parentItem = parentListItem(curItem);
+        const targetLen = parentItem ? listMarkerColumns(parentItem, view.state.doc)?.markCol ?? 0 : 0;
         const line = view.state.doc.lineAt(pos);
-        const leadingMatch = /^ */.exec(line.text);
-        const removeLen = Math.min(LIST_TAB_INDENT.length, leadingMatch ? leadingMatch[0].length : 0);
-        if (removeLen === 0) return true; // já sem recuo — consome o evento, mas não faz nada
-        view.dispatch({
-          changes: { from: line.from, to: line.from + removeLen, insert: "" },
-          selection: { anchor: Math.max(line.from, pos - removeLen) },
-        });
+        const leadingLen = /^ */.exec(line.text)![0].length;
+        if (targetLen >= leadingLen) return true; // já no recuo mínimo — consome o evento, sem alterar nada
+        setLineIndent(view, line, pos, leadingLen, targetLen);
         return true;
       },
     },
@@ -1831,7 +1888,11 @@ export const codeBlockDecorationsField = StateField.define<DecorationSet>({
     return buildCodeBlockDecorations(state);
   },
   update(deco, tr) {
-    if (tr.docChanged || tr.selection) return buildCodeBlockDecorations(tr.state);
+    // Mesmo motivo do check em livePreviewPlugin.update acima: o parse em
+    // segundo plano pode terminar sem docChanged/selection nessa transação.
+    if (tr.docChanged || tr.selection || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
+      return buildCodeBlockDecorations(tr.state);
+    }
     return deco.map(tr.changes);
   },
   provide: (f) => EditorView.decorations.from(f),
@@ -1855,6 +1916,15 @@ export const livePreviewPlugin = ViewPlugin.fromClass(
       const selectedImageChanged =
         update.startState.field(selectedImageField, false) !== update.state.field(selectedImageField, false);
 
+      // syntaxTree(state) != syntaxTree(startState) cobre o parse incremental em
+      // segundo plano do lezer terminando DEPOIS do update que disparou (sem
+      // docChanged nenhum) — sem esse check, uma nota longa (muitos níveis de
+      // lista aninhada, como as de fichamento) fica com decorações construídas
+      // em cima de uma árvore ainda incompleta (alguns ListMark ainda não
+      // existem nela) até a próxima tecla digitada forçar um rebuild — exatamente
+      // o "alterna a cada tecla" relatado: bullet vs traço cru indo e voltando
+      // sem nenhuma mudança real no texto. Padrão recomendado pela própria doc
+      // do CodeMirror pra ViewPlugin que depende da árvore de sintaxe.
       if (
         update.docChanged ||
         update.viewportChanged ||
@@ -1862,7 +1932,8 @@ export const livePreviewPlugin = ViewPlugin.fromClass(
         activeCommentChanged ||
         linkTargetsChanged ||
         blockRefsChanged ||
-        selectedImageChanged
+        selectedImageChanged ||
+        syntaxTree(update.startState) !== syntaxTree(update.state)
       ) {
         this.decorations = buildDecorations(update.view);
       }

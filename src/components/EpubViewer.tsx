@@ -180,22 +180,65 @@ function isTocLikeLabel(label: string): boolean {
 // o fim de um capítulo nunca carregava o próximo sozinho, só manualmente
 // pelo Sumário (regressão real).
 //
-// Fix certo: zerar settings.offset só DURANTE esta chamada de display() (a
-// única hora em que o glitch pode acontecer) e restaurar o valor de
-// verdade logo depois — rendition.display() só resolve depois que o
-// fill()/check() interno do manager já terminou (Rendition._display →
-// manager.display() → fill()), então dá pra restaurar com segurança
-// assim que o await volta.
+// Fix certo (primeira tentativa): zerar settings.offset só DURANTE esta
+// chamada de display() e restaurar o valor de verdade logo depois —
+// rendition.display() só resolve depois que o fill()/check() interno do
+// manager já terminou (Rendition._display → manager.display() → fill()),
+// então em teoria dá pra restaurar assim que o await volta.
+//
+// Na prática isso não bastava: restaurar settings.offset SÍNCRONO logo após
+// o await ainda deixava uma janela curta (poucos frames) em que imagens/
+// fontes do capítulo recém-exibido terminam de carregar, mudam a altura do
+// iframe, e disparam um evento "scroll" nativo no container — o
+// listener desse evento (ContinuousViewManager.onScroll → scrolled() →
+// check(), ver node_modules/epubjs/lib/managers/continuous/index.js) roda
+// DE NOVO, agora com settings.offset já restaurado (500) e scrollTop ainda
+// perto de 0 (acabamos de pular pro início do capítulo) → `start = scrollTop
+// - 500 < 0` → prependa o capítulo ANTERIOR por engano, e o scroll
+// compensatório desse prepend (ver counter()/scrollBy em prepend()) é o que
+// acaba deixando a posição visível perto do FIM do capítulo (altura inteira
+// do capítulo anterior sendo somada ao scroll) — exatamente o sintoma
+// relatado: clicar num capítulo do Sumário/menu vai pro início certo e,
+// segundos depois, "pula" sozinho pra perto do fim.
+//
+// Fix: manter settings.offset em 0 por uma folga curta DEPOIS do display()
+// também (não só durante), tempo suficiente pro reflow de imagens/fontes se
+// acalmar. Chamadas de navegação em sequência rápida (cliques trocando de
+// capítulo várias vezes seguidas) cancelam o timer de restauração anterior
+// em vez de restaurar no meio do caminho — settings.offset só volta ao
+// valor real depois que a ÚLTIMA navegação se estabiliza.
+const OFFSET_RESTORE_DELAY_MS = 600;
+const realOffsetBySettings = new WeakMap<object, number>();
+const offsetRestoreTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function displayWithoutPrependGlitch(rendition: any, target?: string) {
   const manager = rendition?.manager;
   const settings = manager?.settings;
-  const realOffset = settings?.offset;
-  if (settings && typeof realOffset === "number") settings.offset = 0;
+  if (!settings || typeof settings.offset !== "number") {
+    await rendition.display(target);
+    return;
+  }
+
+  const pendingTimer = offsetRestoreTimers.get(settings);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+  } else {
+    // Só registra o valor "de verdade" quando não há restauração pendente —
+    // se já tinha, settings.offset atual é 0 (suprimido), não o valor real.
+    realOffsetBySettings.set(settings, settings.offset);
+  }
+  settings.offset = 0;
+
   try {
     await rendition.display(target);
   } finally {
-    if (settings && typeof realOffset === "number") settings.offset = realOffset;
+    const realOffset = realOffsetBySettings.get(settings) ?? 500;
+    const timer = setTimeout(() => {
+      settings.offset = realOffset;
+      offsetRestoreTimers.delete(settings);
+    }, OFFSET_RESTORE_DELAY_MS);
+    offsetRestoreTimers.set(settings, timer);
   }
 }
 
