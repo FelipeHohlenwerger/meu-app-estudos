@@ -323,3 +323,26 @@ body {
 .textLayer br::selection {
   background: transparent;
 }
+
+/* .epub-container: criado pelo próprio epub.js (Stage, em
+   epubjs/lib/managers/helpers/stage.js), não um elemento nosso — é o
+   container de rolagem do leitor de EPUB (manager "continuous"). Causa raiz
+   do bug "clica num capítulo, rola pra ler, e a posição pula sozinha pro
+   fim do capítulo": o scroll anchoring NATIVO do navegador (ligado por
+   padrão, overflow-anchor:auto) e a compensação MANUAL que o próprio
+   epub.js faz (ContinuousViewManager.counter(), scrollBy(0, heightDelta))
+   competem pela MESMA correção. Logo após abrir um capítulo perto do topo
+   do livro, rolar a página aciona o manager a pré-carregar o capítulo
+   ANTERIOR (prepend, carregado acima do conteúdo visível, pra permitir
+   rolar pra cima sem corte) — quando esse capítulo prepended termina de
+   renderizar e cresce de 0 até sua altura real, o navegador JÁ ajusta
+   scrollTop sozinho pra manter o texto visível no mesmo lugar da tela
+   (exatamente o que overflow-anchor existe pra fazer), e,
+   MILISSEGUNDOS DEPOIS, o próprio epub.js faz scrollTop += heightDelta de
+   novo, pra compensar o MESMO crescimento — resultado: desce o dobro do
+   necessário, ficando bem além do capítulo que acabou de abrir (às vezes
+   no fim dele, se for curto). Desligar o scroll anchoring nativo aqui
+   deixa só a compensação do epub.js valendo, sem double-counting. */
+.epub-container {
+  overflow-anchor: none;
+}

@@ -201,44 +201,98 @@ function isTocLikeLabel(label: string): boolean {
 // relatado: clicar num capítulo do Sumário/menu vai pro início certo e,
 // segundos depois, "pula" sozinho pra perto do fim.
 //
-// Fix: manter settings.offset em 0 por uma folga curta DEPOIS do display()
-// também (não só durante), tempo suficiente pro reflow de imagens/fontes se
-// acalmar. Chamadas de navegação em sequência rápida (cliques trocando de
-// capítulo várias vezes seguidas) cancelam o timer de restauração anterior
-// em vez de restaurar no meio do caminho — settings.offset só volta ao
-// valor real depois que a ÚLTIMA navegação se estabiliza.
-const OFFSET_RESTORE_DELAY_MS = 600;
-const realOffsetBySettings = new WeakMap<object, number>();
-const offsetRestoreTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+// Fix (segunda tentativa, insuficiente): manter settings.offset em 0 por uma
+// folga curta (600ms) DEPOIS do display() também. Reduzia o problema mas não
+// eliminava — instrumentei o manager de verdade (patch temporário em
+// scrollTop/scrollBy + MutationObserver/ResizeObserver, testando com o livro
+// real "Uma Breve História do Mundo") pra ver a sequência exata de eventos
+// quando o usuário começa a ROLAR (não só espera parado) depois de abrir um
+// capítulo pelo Sumário:
+//
+//   1. display() pousa em scrollTop=0 (início do capítulo certo, OK).
+//   2. O usuário rola um pouco pra baixo (scrollTop sobe só um pouco, ex: 150).
+//   3. check() (disparado pelo scroll real) vê scrollTop ainda perto de 0 e
+//      PREPENDA o capítulo anterior — mas a recursão interna de check()/fill()
+//      (ver node_modules/epubjs/lib/managers/continuous/index.js: fill() chama
+//      check() de novo se "newViews.length" > 0) prepende MAIS DE UMA seção
+//      em sequência, ANTES de qualquer uma delas ter renderizado — porque a
+//      condição usada (scrollTop) ainda não foi compensada, só é compensada
+//      DEPOIS, quando cada view prependada efetivamente redimensiona.
+//   4. Cada uma dessas views, ao carregar (em PASSADAS incrementais — uma
+//      imagem/fonte de cada vez), dispara "resized" → counter() → scrollBy
+//      com a altura daquele incremento. Como várias views foram empilhadas,
+//      essas compensações se SOMAM — build real observado: +6860, +3275,
+//      +358 (quase 10500px), bem mais que a altura de UM capítulo.
+//
+// 600ms de folga não bastava simplesmente porque o usuário real demora mais
+// que isso entre clicar no Sumário e começar a rolar de propósito (meu teste
+// automatizado, com uma pausa de 1.5s simulando "olhar a página" antes de
+// rolar, já era suficiente pra passar da janela).
+//
+// Fix de verdade: em vez de mexer em settings.offset (que afeta os dois
+// lados — também é a margem usada pra pré-carregar o PRÓXIMO capítulo
+// durante leitura normal, por isso não dá pra zerar/bloquear pra sempre),
+// suprime especificamente o lado "pra trás" por uma janela bem mais
+// generosa.
+//
+// Tentei primeiro sobrescrever manager.prepend() direto (no-op) — quebrou:
+// a closure "prepend" DENTRO de check() sempre empurra o retorno de
+// this.prepend(prev) em newViews (newViews.push(this.prepend(prev))), e o
+// código logo depois assume que todo item de newViews é uma View de
+// verdade, chamando view.display(...) nela — um no-op retornando undefined
+// vira "Cannot read properties of undefined (reading 'display')" (erro
+// real visto testando). Então o alvo certo pra suprimir não é prepend() em
+// si, é fazer a condição "tem uma seção anterior pra carregar" dar falso
+// ANTES de chegar em prepend() — exatamente o que acontece naturalmente
+// quando não há mesmo nenhuma seção anterior.
+//
+// check() decide isso via `this.views.first().section.prev()` (ver
+// node_modules/epubjs/lib/managers/continuous/index.js) — sobrescrever só
+// `manager.views.first` pra devolver null durante a janela de supressão faz
+// essa checagem cair exatamente no caminho "sem seção anterior" que o
+// próprio epub.js já trata bem (newViews fica vazio, sem nenhum view falso
+// pra quebrar depois). `views.first()` só é usado nesse ponto dentro do
+// manager "continuous" (grep confirma) — o único outro uso no pacote é em
+// next()/prev() de PAGINAÇÃO (default/index.js), caminho que este app nunca
+// chama (usamos flow "scrolled"/manager "continuous", sem botão de
+// próxima/página anterior). append() (pré-carregar o PRÓXIMO capítulo,
+// via views.last(), não tocado aqui) continua funcionando o tempo todo, sem
+// nenhuma restrição — só o lado "pra trás" fica suspenso. Ainda é uma
+// janela de tempo (não 100% à prova de um usuário que espera MUITO antes de
+// rolar), mas generosa o bastante pra cobrir qualquer pausa realista de
+// leitura.
+const PREPEND_SUPPRESSION_MS = 6000;
+const realViewsFirstByManager = new WeakMap<object, () => unknown>();
+const prependRestoreTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function displayWithoutPrependGlitch(rendition: any, target?: string) {
   const manager = rendition?.manager;
-  const settings = manager?.settings;
-  if (!settings || typeof settings.offset !== "number") {
+  const views = manager?.views;
+  if (!views || typeof views.first !== "function") {
     await rendition.display(target);
     return;
   }
 
-  const pendingTimer = offsetRestoreTimers.get(settings);
+  const pendingTimer = prependRestoreTimers.get(manager);
   if (pendingTimer) {
     clearTimeout(pendingTimer);
   } else {
-    // Só registra o valor "de verdade" quando não há restauração pendente —
-    // se já tinha, settings.offset atual é 0 (suprimido), não o valor real.
-    realOffsetBySettings.set(settings, settings.offset);
+    // Só registra o first() "de verdade" quando não há supressão pendente —
+    // se já tinha, views.first atual já é o substituto, não o original.
+    realViewsFirstByManager.set(manager, views.first.bind(views));
   }
-  settings.offset = 0;
+  views.first = () => null;
 
   try {
     await rendition.display(target);
   } finally {
-    const realOffset = realOffsetBySettings.get(settings) ?? 500;
     const timer = setTimeout(() => {
-      settings.offset = realOffset;
-      offsetRestoreTimers.delete(settings);
-    }, OFFSET_RESTORE_DELAY_MS);
-    offsetRestoreTimers.set(settings, timer);
+      const realFirst = realViewsFirstByManager.get(manager);
+      if (realFirst) views.first = realFirst;
+      prependRestoreTimers.delete(manager);
+    }, PREPEND_SUPPRESSION_MS);
+    prependRestoreTimers.set(manager, timer);
   }
 }
 
@@ -645,16 +699,40 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
       // diferença de verdade não é "mesmo arquivo ou não", é DE ONDE o link
       // parte: só uma página que o PRÓPRIO EPUB rotula como sumário/índice na
       // navegação oficial (book.navigation.toc) deve ter seus links de saída
-      // corrigidos — uma nota de rodapé nunca parte de uma página dessas.
+      // com a âncora ignorada — uma nota de rodapé nunca parte de uma página
+      // dessas.
       //
-      // Fix: contents.document já tem os onclick que o epub.js atribuiu a
-      // cada link interno (Contents.listeners()/linksHandler roda no
-      // CONSTRUTOR de Contents, sempre antes de afterDisplayed() disparar
-      // hooks.content — ver epubjs/src/contents.js e rendition.js). Só
-      // quando a seção ATUAL é uma página de sumário/índice (isTocLikeLabel),
-      // para cada link de saída cuja âncora aponta pra uma seção do spine
-      // DIFERENTE da atual, sobrescrevemos o onclick pra ignorar a âncora e
-      // navegar só pro arquivo, igual ao sumário do cabeçalho.
+      // Achado testando com um segundo livro real ("Uma Breve História do
+      // Mundo", Geoffrey Blainey): o sumário impresso dele nem aparece em
+      // book.navigation.toc — o arquivo da página (004.html) só é referenciado
+      // via <guide type="toc"> do OPF, elemento que o epub.js NEM PARSEIA
+      // (grep em node_modules/epubjs/lib/packaging.js não acha "guide" em
+      // lugar nenhum). isTocLikeLabel nunca detecta essa página como sumário,
+      // então o trecho ABAIXO (ignorar a âncora) nunca roda pra ela — tudo
+      // bem, só perde o "pula pro TOPO do capítulo" nesse caso específico.
+      // O problema sério era outro: o código antigo também só chamava
+      // displayWithoutPrependGlitch() (a proteção contra o glitch de prepend,
+      // ver comentário dela acima) DENTRO desse mesmo "if (!currentIsTocPage)
+      // return" — ou seja, em QUALQUER página não reconhecida como sumário
+      // (como esta), o clique caía no handler padrão do próprio epub.js
+      // (Rendition.handleLinks → this.display(relative) cru, em
+      // node_modules/epubjs/lib/rendition.js) — sem proteção NENHUMA contra o
+      // glitch, voltando a produzir exatamente "vai pro capítulo certo e
+      // pula sozinho pra perto do fim" pra QUALQUER link interno nessas
+      // páginas, sumário impresso ou não.
+      //
+      // Fix: separar as duas decisões. A proteção contra o glitch
+      // (displayWithoutPrependGlitch) agora envolve TODO clique em link
+      // interno, em qualquer página — não só as reconhecidas como sumário.
+      // Só a decisão de IGNORAR A ÂNCORA (pular pro topo do capítulo em vez
+      // de pro ponto exato) continua condicionada a isTocLikeLabel, porque
+      // essa parte depende mesmo de saber que a página é um sumário de
+      // verdade (o cuidado com notas de rodapé explicado acima).
+      //
+      // contents.document já tem os onclick que o epub.js atribuiu a cada
+      // link interno (Contents.listeners()/linksHandler roda no CONSTRUTOR
+      // de Contents, sempre antes de afterDisplayed() disparar hooks.content
+      // — ver epubjs/src/contents.js e rendition.js).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rendition.hooks.content.register((contents: any) => {
         const doc: Document = contents.document;
@@ -665,7 +743,6 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
         const currentIsTocPage = tocEntries.some(
           (entry) => entry.href.split("#")[0] === currentFile && isTocLikeLabel(entry.label)
         );
-        if (!currentIsTocPage) return;
         const anchors = Array.from(doc.querySelectorAll("a[href]")) as HTMLAnchorElement[];
         for (const a of anchors) {
           // epub.js só define onclick pra link que ELE MESMO considerou
@@ -674,24 +751,26 @@ const EpubViewer = forwardRef<EpubViewerHandle, Props>(function EpubViewer(
           // sem precisar reimplementar essa checagem aqui.
           if (typeof a.onclick !== "function") continue;
           const rawHref = a.getAttribute("href") ?? "";
-          if (rawHref.indexOf("#") === -1) continue; // sem âncora — já vai pro início normalmente
-          let targetPath: string;
+          let resolved: URL;
           try {
             // Resolução nativa de URL relativa (mesma regra de um <base> HTML)
             // contra o caminho do capítulo ATUAL — origem fictícia só pra ter
             // uma base absoluta válida pro construtor de URL; descartada logo
             // depois, junto com o "/" inicial que ela introduz.
-            targetPath = new URL(rawHref, "https://epub.invalid/" + currentSection.href).pathname.replace(/^\//, "");
+            resolved = new URL(rawHref, "https://epub.invalid/" + currentSection.href);
           } catch {
             continue;
           }
+          const targetPath = resolved.pathname.replace(/^\//, "");
           const targetSection = bookRef.current?.spine?.get(targetPath);
-          if (targetSection && targetSection.index !== currentSection.index) {
-            a.onclick = () => {
-              if (renditionRef.current) displayWithoutPrependGlitch(renditionRef.current, targetSection.href);
-              return false;
-            };
-          }
+          if (!targetSection) continue; // não resolve pra nenhuma seção do spine — deixa o comportamento padrão
+          const shouldStripAnchor =
+            currentIsTocPage && resolved.hash !== "" && targetSection.index !== currentSection.index;
+          const target = shouldStripAnchor ? targetSection.href : targetPath + resolved.hash;
+          a.onclick = () => {
+            if (renditionRef.current) displayWithoutPrependGlitch(renditionRef.current, target);
+            return false;
+          };
         }
       });
 
