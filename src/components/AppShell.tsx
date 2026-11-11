@@ -28,6 +28,7 @@ import { DEFAULT_NOTE_FONT, type NoteFontId } from "@/lib/fonts";
 import { isTauri } from "@/lib/platform";
 import { useIsMobile } from "@/lib/useIsMobile";
 import { formatRelativeTime } from "@/lib/relativeTime";
+import { isTextNoteFile } from "@/lib/slugify";
 
 function stripMdExtension(filename: string): string {
   return filename.replace(/\.(md|pdf|epub)$/i, "");
@@ -373,9 +374,11 @@ export default function AppShell() {
   const [importing, setImporting] = useState(false);
   const [importingMessage, setImportingMessage] = useState("Convertendo arquivo...");
   const importFileInputRef = useRef<HTMLInputElement>(null);
+  const importTextFileInputRef = useRef<HTMLInputElement>(null);
   const [importWebOpen, setImportWebOpen] = useState(false);
   const [importWebUrl, setImportWebUrl] = useState("");
   const [creatingBlankNote, setCreatingBlankNote] = useState(false);
+  const [sidebarDragActive, setSidebarDragActive] = useState(false);
 
   const [showGraph, setShowGraph] = useState(false);
   const [graphScope, setGraphScope] = useState<"local" | "global">("local");
@@ -1724,6 +1727,11 @@ export default function AppShell() {
     importFileInputRef.current?.click();
   }
 
+  function handleImportTextClick() {
+    setNewNoteMenuAnchor(null);
+    importTextFileInputRef.current?.click();
+  }
+
   function handleImportWebClick() {
     setNewNoteMenuAnchor(null);
     setImportWebUrl("");
@@ -1747,6 +1755,77 @@ export default function AppShell() {
       fetchNoteTargets();
       fetchLibraryData();
       openNoteInPanel(data.filename);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  // Usado tanto pelo <input type="file" multiple> (menu "+") quanto pelo
+  // arrastar-e-soltar de .md/.markdown/.txt na Biblioteca/sidebar — um ou
+  // vários arquivos de uma vez, cada um reportado individualmente (falha em
+  // um não derruba os outros, ver /api/note/import-text).
+  async function handleTextFilesSelected(files: File[]) {
+    if (files.length === 0) return;
+    setImportingMessage(files.length === 1 ? "Importando arquivo..." : "Importando arquivos...");
+    setImporting(true);
+    try {
+      const formData = new FormData();
+      for (const file of files) formData.append("files", file);
+      const res = await vaultFetch("/api/note/import-text", { method: "POST", body: formData });
+      const data: {
+        imported?: { filename: string; originalName: string; renamed: boolean; hasLocalImageRefs: boolean }[];
+        failed?: { originalName: string; reason: string }[];
+        error?: string;
+      } = await res.json();
+
+      if (!data.imported) {
+        window.alert(data.error ?? "Não foi possível importar os arquivos");
+        return;
+      }
+
+      const { imported, failed = [] } = data;
+      if (imported.length > 0) {
+        fetchNoteTargets();
+        fetchLibraryData();
+      }
+
+      // "Abrir direto" (um arquivo só) e "avisar que o nome foi ajustado/tem
+      // imagem local quebrada" não são mutuamente exclusivos — um arquivo só,
+      // sem nada a avisar, abre direto e fica quieto (mesmo padrão do resto
+      // do app: nenhuma mensagem numa importação "limpa"); um arquivo só que
+      // colidiu/tem imagem local ABRE E avisa, já que o pedido original é
+      // explícito sobre sempre informar o reajuste de nome quando acontece.
+      const singleCleanImport = imported.length === 1 && failed.length === 0 && !imported[0].hasLocalImageRefs && !imported[0].renamed;
+      if (singleCleanImport) {
+        openNoteInPanel(imported[0].filename);
+        return;
+      }
+
+      const renamedCount = imported.filter((f) => f.renamed).length;
+      const hasLocalImageRefs = imported.some((f) => f.hasLocalImageRefs);
+      const lines: string[] = [];
+      lines.push(imported.length === 1 ? "1 nota importada." : `${imported.length} notas importadas.`);
+      if (renamedCount > 0) {
+        lines.push(
+          renamedCount === 1
+            ? "1 delas teve o nome ajustado por já existir uma nota com esse nome."
+            : `${renamedCount} delas tiveram o nome ajustado por já existir uma nota com esse nome.`
+        );
+      }
+      if (failed.length > 0) {
+        lines.push(`${failed.length} arquivo(s) não puderam ser importados:`);
+        for (const f of failed) lines.push(`- ${f.originalName}: ${f.reason}`);
+      }
+      if (hasLocalImageRefs) {
+        lines.push("Algumas notas referenciam imagens locais, que não foram copiadas — podem aparecer quebradas.");
+      }
+      window.alert(lines.join("\n"));
+      // Mesmo com aviso (renomeada/imagem local), um único arquivo bem
+      // importado ainda abre direto — só o "voltar pra lista" é exclusivo do
+      // caso de vários arquivos.
+      if (imported.length === 1 && failed.length === 0) {
+        openNoteInPanel(imported[0].filename);
+      }
     } finally {
       setImporting(false);
     }
@@ -2147,8 +2226,10 @@ export default function AppShell() {
           onToggleCalibreFavorite={toggleCalibreFavorite}
           onOpenNewNoteMenu={openNewNoteMenu}
           onFileDropped={handleFileSelected}
+          onTextFilesDropped={handleTextFilesSelected}
           onCreateBlank={handleCreateBlank}
           onImportClick={handleImportClick}
+          onImportTextClick={handleImportTextClick}
           onImportWebClick={handleImportWebClick}
           creatingBlankNote={creatingBlankNote}
         />
@@ -2252,10 +2333,10 @@ export default function AppShell() {
       )}
 
       <aside
-        style={
-          isMobile
+        style={{
+          ...(isMobile
             ? {
-                position: "fixed",
+                position: "fixed" as const,
                 top: 0,
                 left: mobileSidebarOpen ? 0 : "-280px",
                 width: "280px",
@@ -2265,7 +2346,7 @@ export default function AppShell() {
                 borderRight: "1px solid var(--panel-border)",
                 padding: "1rem",
                 overflow: "hidden",
-                overflowY: "auto",
+                overflowY: "auto" as const,
                 transition: "left 0.2s ease",
                 boxShadow: mobileSidebarOpen ? "2px 0 12px rgba(0,0,0,0.3)" : "none",
               }
@@ -2275,10 +2356,26 @@ export default function AppShell() {
                 borderRight: sidebarCollapsed ? "none" : "1px solid var(--panel-border)",
                 padding: sidebarCollapsed ? "0" : "1rem",
                 overflow: "hidden",
-                overflowY: sidebarCollapsed ? "hidden" : "auto",
+                overflowY: sidebarCollapsed ? "hidden" : ("auto" as const),
                 transition: "width 0.18s ease, padding 0.18s ease",
-              }
-        }
+              }),
+          // Arrastar-e-soltar de .md/.markdown/.txt também funciona aqui, não
+          // só na Homepage (ver onDrop abaixo) — mesmo contorno tracejado de
+          // "solte pra importar" que LibraryHome já usa.
+          outline: sidebarDragActive ? "2px dashed #2f7fd6" : "none",
+          outlineOffset: "-6px",
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setSidebarDragActive(true);
+        }}
+        onDragLeave={() => setSidebarDragActive(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setSidebarDragActive(false);
+          const textFiles = Array.from(e.dataTransfer.files).filter(isTextNoteFile);
+          if (textFiles.length > 0) handleTextFilesSelected(textFiles);
+        }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.15rem" }}>
@@ -2680,6 +2777,19 @@ export default function AppShell() {
         }}
       />
 
+      <input
+        ref={importTextFileInputRef}
+        type="file"
+        accept=".md,.markdown,.txt"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) handleTextFilesSelected(files);
+        }}
+      />
+
       {newNoteMenuAnchor && (
         <NewNoteMenu
           x={newNoteMenuAnchor.x}
@@ -2687,6 +2797,7 @@ export default function AppShell() {
           direction={newNoteMenuAnchor.direction}
           onCreateBlank={handleCreateBlank}
           onImportClick={handleImportClick}
+          onImportTextClick={handleImportTextClick}
           onImportWebClick={handleImportWebClick}
           onClose={() => setNewNoteMenuAnchor(null)}
         />

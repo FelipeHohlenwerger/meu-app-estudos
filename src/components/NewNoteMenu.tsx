@@ -12,6 +12,7 @@ type Props = {
   direction?: "down-right" | "up-left";
   onCreateBlank: () => void;
   onImportClick: () => void;
+  onImportTextClick: () => void;
   onImportWebClick: () => void;
   onClose: () => void;
 };
@@ -22,6 +23,7 @@ export default function NewNoteMenu({
   direction = "down-right",
   onCreateBlank,
   onImportClick,
+  onImportTextClick,
   onImportWebClick,
   onClose,
 }: Props) {
@@ -101,6 +103,22 @@ export default function NewNoteMenu({
         }}
       >
         Importar PDF/EPUB
+      </button>
+      <button
+        onClick={onImportTextClick}
+        className="toolbar-link"
+        style={{
+          padding: "0.5rem 0.7rem",
+          background: "transparent",
+          border: "none",
+          borderRadius: "4px",
+          cursor: "pointer",
+          textAlign: "left",
+          fontSize: "13px",
+          color: "var(--foreground)",
+        }}
+      >
+        Importar nota (.md)
       </button>
       <button
         onClick={onImportWebClick}

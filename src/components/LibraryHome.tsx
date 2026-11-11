@@ -8,6 +8,7 @@ import type { FavoriteItem } from "@/lib/favoriteItems";
 import type { CalibreBook } from "@/lib/calibreLibrary";
 import { formatRelativeTime } from "@/lib/relativeTime";
 import { formatTagLabel, normalizeTagKey } from "@/lib/tagTree";
+import { isTextNoteFile } from "@/lib/slugify";
 
 type Props = {
   notes: LibraryNote[];
@@ -45,10 +46,15 @@ type Props = {
   onToggleCalibreFavorite: (bookId: number) => void;
   onOpenNewNoteMenu: (rect: DOMRect, direction?: "down-right" | "up-left") => void;
   onFileDropped: (file: File) => void;
-  // Mesmas 3 ações do menu "+" — reaproveitadas em destaque no estado vazio
+  // Arquivos .md/.markdown/.txt de um mesmo drop — ver onDrop abaixo, que
+  // separa por extensão (pdf/epub continua indo 1 de cada vez pro
+  // onFileDropped de sempre).
+  onTextFilesDropped: (files: File[]) => void;
+  // Mesmas 4 ações do menu "+" — reaproveitadas em destaque no estado vazio
   // (vault novo, ou vault existente que perdeu todas as notas).
   onCreateBlank: () => void;
   onImportClick: () => void;
+  onImportTextClick: () => void;
   onImportWebClick: () => void;
   // Desabilita o botão "Criar nota" enquanto a criação anterior ainda está em
   // andamento — evita cliques repetidos disparando várias notas de uma vez
@@ -71,6 +77,16 @@ function DocumentPlusIcon() {
       <path d="M14 3v4a1 1 0 0 0 1 1h4" />
       <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z" />
       <path d="M12 11v6M9 14h6" />
+    </svg>
+  );
+}
+
+function DocumentTextIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+      <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z" />
+      <path d="M9 13h6M9 17h6" />
     </svg>
   );
 }
@@ -365,8 +381,10 @@ export default function LibraryHome({
   onToggleCalibreFavorite,
   onOpenNewNoteMenu,
   onFileDropped,
+  onTextFilesDropped,
   onCreateBlank,
   onImportClick,
+  onImportTextClick,
   onImportWebClick,
   creatingBlankNote,
 }: Props) {
@@ -440,8 +458,13 @@ export default function LibraryHome({
       onDrop={(e) => {
         e.preventDefault();
         setDragActive(false);
-        const file = e.dataTransfer.files?.[0];
-        if (file) onFileDropped(file);
+        const dropped = Array.from(e.dataTransfer.files);
+        const textFiles = dropped.filter(isTextNoteFile);
+        if (textFiles.length > 0) onTextFilesDropped(textFiles);
+        // PDF/EPUB: mantém o comportamento de sempre — só o primeiro do
+        // drop, independente de quantos .md vieram junto.
+        const otherFile = dropped.find((f) => !isTextNoteFile(f));
+        if (otherFile) onFileDropped(otherFile);
       }}
     >
       {notes.length === 0 ? (
@@ -468,6 +491,7 @@ export default function LibraryHome({
               disabled={creatingBlankNote}
             />
             <EmptyStateActionButton icon={<UploadIcon />} label="Importar EPUB/PDF" onClick={onImportClick} />
+            <EmptyStateActionButton icon={<DocumentTextIcon />} label="Importar nota (.md)" onClick={onImportTextClick} />
             <EmptyStateActionButton icon={<GlobeIcon />} label="Importar da web" onClick={onImportWebClick} />
           </div>
         </div>
